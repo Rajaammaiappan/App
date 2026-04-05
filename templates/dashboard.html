@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Loan Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-speedometer2 me-2 text-primary"></i>Dashboard</h1>
+  <span class="text-muted small"><i class="bi bi-calendar3 me-1"></i>{{ today }}</span>
+</div>
+
+<!-- KPI Cards Row 1 -->
+<div class="row g-3 mb-3">
+  <div class="col-6 col-md-3">
+    <div class="kpi-card d-flex justify-content-between align-items-start" style="background: linear-gradient(135deg,#0057b8,#003d82)">
+      <div>
+        <div class="kpi-val">{{ kpis.total }}</div>
+        <div class="kpi-lbl">Total Loans</div>
+      </div>
+      <i class="bi bi-file-earmark-text kpi-icon"></i>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card d-flex justify-content-between align-items-start" style="background: linear-gradient(135deg,#00844c,#005c35)">
+      <div>
+        <div class="kpi-val">₹{{ '{:,.0f}'.format(kpis.disbursed) }}</div>
+        <div class="kpi-lbl">Total Disbursed</div>
+      </div>
+      <i class="bi bi-bank kpi-icon"></i>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card d-flex justify-content-between align-items-start" style="background: linear-gradient(135deg,#0d6efd,#0a58ca)">
+      <div>
+        <div class="kpi-val">₹{{ '{:,.0f}'.format(kpis.received) }}</div>
+        <div class="kpi-lbl">Amount Collected</div>
+      </div>
+      <i class="bi bi-cash-stack kpi-icon"></i>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="kpi-card d-flex justify-content-between align-items-start" style="background: linear-gradient(135deg,#d7263d,#a01c2e)">
+      <div>
+        <div class="kpi-val">₹{{ '{:,.0f}'.format(kpis.pending_amt) }}</div>
+        <div class="kpi-lbl">Amount Pending</div>
+      </div>
+      <i class="bi bi-clock-history kpi-icon"></i>
+    </div>
+  </div>
+</div>
+
+<!-- Stat Mini Cards -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val text-warning">{{ kpis.pending }}</div>
+      <div class="stat-lbl">Awaiting Approval</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val text-success">{{ kpis.approved }}</div>
+      <div class="stat-lbl">Active Loans</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val text-secondary">{{ kpis.closed }}</div>
+      <div class="stat-lbl">Closed Loans</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val text-danger">{{ kpis.rejected }}</div>
+      <div class="stat-lbl">Rejected</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val text-danger">{{ kpis.overdue }}</div>
+      <div class="stat-lbl">Overdue EMIs</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-2">
+    <div class="stat-card">
+      <div class="stat-val" style="color:#f59e0b">{{ kpis.upcoming }}</div>
+      <div class="stat-lbl">Due in 10 Days</div>
+    </div>
+  </div>
+</div>
+
+<!-- Tables Row -->
+<div class="row g-4">
+  <!-- Overdue EMIs -->
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header danger d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-exclamation-triangle-fill me-2"></i>Overdue EMIs</span>
+        <a href="/alerts" class="btn btn-sm btn-outline-danger">View All</a>
+      </div>
+      <div class="table-responsive">
+        <table class="table mb-0">
+          <thead>
+            <tr>
+              <th>Loan #</th><th>Customer</th><th>Due Date</th><th>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in overdue %}
+            <tr>
+              <td><span class="fw-semibold">{{ e.loan_number }}</span></td>
+              <td>{{ e.customer_name }}</td>
+              <td><span class="text-danger">{{ e.due_date }}</span></td>
+              <td><span class="fw-semibold text-danger">₹{{ '{:,.0f}'.format(e.remaining_amount or e.emi_amount) }}</span></td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="4" class="text-center text-success py-3">
+                <i class="bi bi-check-circle me-1"></i>No overdue EMIs!
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upcoming EMIs -->
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-header warning d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-clock-fill me-2"></i>Upcoming EMIs (10 days)</span>
+        <a href="/alerts" class="btn btn-sm btn-outline-warning">View All</a>
+      </div>
+      <div class="table-responsive">
+        <table class="table mb-0">
+          <thead>
+            <tr>
+              <th>Loan #</th><th>Customer</th><th>Due Date</th><th>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for e in upcoming %}
+            <tr>
+              <td><span class="fw-semibold">{{ e.loan_number }}</span></td>
+              <td>{{ e.customer_name }}</td>
+              <td>{{ e.due_date }}</td>
+              <td><span class="fw-semibold">₹{{ '{:,.0f}'.format(e.remaining_amount or e.emi_amount) }}</span></td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="4" class="text-center text-muted py-3">
+                <i class="bi bi-calendar-check me-1"></i>No upcoming EMIs
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

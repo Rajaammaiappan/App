@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Loan Calculator — Loan Manager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-calculator me-2 text-primary"></i>Loan Calculator</h1>
+</div>
+<div class="row g-4">
+  <!-- Input Panel -->
+  <div class="col-lg-4">
+    <div class="card">
+      <div class="card-header primary"><i class="bi bi-sliders me-2"></i>Calculator Inputs</div>
+      <div class="card-body">
+        <form method="POST" action="/calculator">
+          <div class="mb-3">
+            <label class="form-label">Calculate</label>
+            <select name="mode" class="form-select" id="calc-mode">
+              <option value="EMI" {{ 'selected' if request.form.get('mode','EMI')=='EMI' }}>EMI Amount</option>
+              <option value="Affordability" {{ 'selected' if request.form.get('mode')=='Affordability' }}>Max Loan Amount</option>
+              <option value="Tenure" {{ 'selected' if request.form.get('mode')=='Tenure' }}>Loan Tenure</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Loan Amount (₹)</label>
+            <div class="input-group">
+              <span class="input-group-text">₹</span>
+              <input type="number" name="loan_amount" step="0.01" class="form-control" value="{{ request.form.get('loan_amount','') }}" placeholder="0.00">
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Annual Interest Rate (%)</label>
+            <div class="input-group">
+              <input type="number" name="interest_rate" step="0.01" class="form-control" value="{{ request.form.get('interest_rate','') }}" placeholder="e.g. 12">
+              <span class="input-group-text">%</span>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Tenure (months)</label>
+            <div class="input-group">
+              <input type="number" name="tenure" class="form-control" value="{{ request.form.get('tenure','') }}" placeholder="e.g. 24">
+              <span class="input-group-text">mo</span>
+            </div>
+          </div>
+          <div class="mb-4">
+            <label class="form-label">EMI Amount (₹) <span class="text-muted fw-normal">(for Affordability/Tenure)</span></label>
+            <div class="input-group">
+              <span class="input-group-text">₹</span>
+              <input type="number" name="emi_amount" step="0.01" class="form-control" value="{{ request.form.get('emi_amount','') }}" placeholder="0.00">
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary w-100"><i class="bi bi-calculator me-2"></i>Calculate</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results Panel -->
+  <div class="col-lg-8">
+    {% if result %}
+    <!-- Result Summary -->
+    <div class="card mb-4" style="border-left: 4px solid #0057b8;">
+      <div class="card-body">
+        <h5 class="text-primary fw-bold mb-3">{{ result.label }}: <span style="font-size:1.4rem">{{ result.value }}</span></h5>
+        <div class="row g-3 text-center">
+          <div class="col-md-4">
+            <div class="bg-light rounded p-3">
+              <div class="fw-bold fs-5 text-primary">{{ result.value }}</div>
+              <div class="text-muted small">{{ result.label }}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="bg-light rounded p-3">
+              <div class="fw-bold fs-5">{{ result.total }}</div>
+              <div class="text-muted small">Total Payment</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="bg-light rounded p-3">
+              <div class="fw-bold fs-5 text-danger">{{ result.interest }}</div>
+              <div class="text-muted small">Total Interest</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Amortization Table -->
+    {% if schedule %}
+    <div class="card">
+      <div class="card-header primary d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-table me-2"></i>Amortization Schedule</span>
+        <span class="badge bg-primary">{{ schedule|length }} months</span>
+      </div>
+      <div style="max-height: 420px; overflow-y: auto;">
+        <table class="table table-sm mb-0">
+          <thead style="position:sticky;top:0;z-index:1">
+            <tr><th>#</th><th>Principal (₹)</th><th>Interest (₹)</th><th>EMI (₹)</th><th>Balance (₹)</th></tr>
+          </thead>
+          <tbody>
+            {% for r in schedule %}
+            <tr>
+              <td>{{ r.month }}</td>
+              <td>{{ '{:,.2f}'.format(r.principal) }}</td>
+              <td class="text-danger">{{ '{:,.2f}'.format(r.interest) }}</td>
+              <td class="fw-semibold">{{ '{:,.2f}'.format(r.emi) }}</td>
+              <td class="text-muted">{{ '{:,.2f}'.format(r.balance) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% elif not result %}
+    <div class="card">
+      <div class="card-body text-center py-5 text-muted">
+        <i class="bi bi-calculator fs-1 d-block mb-3 text-primary opacity-50"></i>
+        <h5>Enter loan details to calculate</h5>
+        <p class="small">Fill in the form on the left and click Calculate</p>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

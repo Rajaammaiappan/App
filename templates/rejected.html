@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Rejected Loans — Loan Manager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-x-circle me-2 text-danger"></i>Rejected Loans</h1>
+</div>
+<div class="card mb-3"><div class="card-body py-2 px-3">
+<form method="GET" class="d-flex gap-2">
+  <div class="search-box"><i class="bi bi-search search-icon"></i>
+  <input type="text" name="q" value="{{ q_ }}" class="form-control" placeholder="Search..."></div>
+  <button class="btn btn-primary btn-sm">Search</button>
+</form></div></div>
+<div class="card"><div class="table-responsive"><table class="table mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Reason</th><th>Rejected At</th></tr></thead>
+<tbody>
+{% for l in rows %}
+<tr>
+  <td class="fw-semibold text-danger">{{ l.loan_number }}</td>
+  <td>{{ l.customer_name }}</td>
+  <td>{{ l.reason }}</td>
+  <td style="font-size:.8rem">{{ l.created_at[:10] }}</td>
+</tr>
+{% else %}
+<tr><td colspan="4" class="text-center text-muted py-4">
+  <i class="bi bi-x-circle fs-3 d-block mb-2"></i>No rejected loans.
+</td></tr>
+{% endfor %}
+</tbody></table></div></div>
+{% endblock %}

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}All Loans — Loan Manager{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-file-earmark-text me-2 text-primary"></i>All Loans</h1>
+  {% if can_do('can_add') %}
+  <a href="/loan/add" class="btn btn-primary btn-sm">
+    <i class="bi bi-plus-lg me-1"></i>New Loan
+  </a>
+  {% endif %}
+</div>
+
+<!-- Filters -->
+<div class="card mb-4">
+  <div class="card-body py-2 px-3">
+    <form method="GET" class="d-flex gap-2 flex-wrap align-items-center">
+      <div class="search-box">
+        <i class="bi bi-search search-icon"></i>
+        <input type="text" name="q" value="{{ q_ }}" class="form-control" placeholder="Search loan #, customer, type...">
+      </div>
+      <select name="status" class="form-select" style="width:180px">
+        <option value="">All Statuses</option>
+        <option value="PendingApproval" {{ 'selected' if status=='PendingApproval' }}>Pending Approval</option>
+        <option value="Approved" {{ 'selected' if status=='Approved' }}>Approved</option>
+        <option value="Closed" {{ 'selected' if status=='Closed' }}>Closed</option>
+        <option value="Rejected" {{ 'selected' if status=='Rejected' }}>Rejected</option>
+      </select>
+      <button type="submit" class="btn btn-primary btn-sm">Search</button>
+      <a href="/loans" class="btn btn-outline-secondary btn-sm">Clear</a>
+      <span class="text-muted small ms-auto">{{ rows|length }} records</span>
+    </form>
+  </div>
+</div>
+
+<!-- Table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="table mb-0">
+      <thead>
+        <tr>
+          <th>Loan #</th><th>Customer</th><th>Type</th>
+          <th>Amount</th><th>Rate</th><th>Tenure</th>
+          <th>Start Date</th><th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in rows %}
+        <tr>
+          <td><span class="fw-semibold text-primary">{{ l.loan_number }}</span></td>
+          <td>{{ l.customer_name }}</td>
+          <td><span class="badge bg-light text-dark">{{ l.vehicle_type }}</span></td>
+          <td><span class="fw-semibold">₹{{ '{:,.0f}'.format(l.loan_amount) }}</span></td>
+          <td>{{ '{:.1f}'.format(l.interest_rate * 100) }}%</td>
+          <td>{{ l.tenure }}m</td>
+          <td>{{ l.start_date }}</td>
+          <td>
+            <span class="status-pill
+              {{ 'status-approved' if l.status == 'Approved' else
+                 'status-rejected' if l.status == 'Rejected' else
+                 'status-closed' if l.status == 'Closed' else
+                 'status-pending' }}">
+              {{ l.status }}
+            </span>
+          </td>
+          <td>
+            <a href="/emis/{{ l.id }}" class="btn btn-sm btn-outline-primary">
+              <i class="bi bi-calendar3 me-1"></i>EMIs
+            </a>
+          </td>
+        </tr>
+        {% else %}
+        <tr>
+          <td colspan="9" class="text-center text-muted py-4">
+            <i class="bi bi-inbox fs-3 d-block mb-2"></i>No loans found.
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

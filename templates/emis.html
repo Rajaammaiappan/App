@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}EMI Schedule — Loan Manager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1 class="page-title"><i class="bi bi-calendar3 me-2 text-primary"></i>EMI Schedule</h1>
+    {% if loan %}<p class="text-muted mb-0 small">{{ loan.loan_number }} — {{ loan.customer_name }}</p>{% endif %}
+  </div>
+  <div class="d-flex gap-2">
+    {% if loan %}
+    <a href="/export/emis/{{ loan_id }}" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-download me-1"></i>Export CSV
+    </a>
+    {% endif %}
+    <a href="/customers" class="btn btn-outline-secondary btn-sm">
+      <i class="bi bi-arrow-left me-1"></i>Back
+    </a>
+  </div>
+</div>
+
+{% if loan %}
+<!-- Loan Summary Card -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="stat-card">
+      <div class="stat-val text-primary">₹{{ '{:,.0f}'.format(loan.loan_amount) }}</div>
+      <div class="stat-lbl">Loan Amount</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="stat-card">
+      <div class="stat-val text-success">
+        {% set paid = rows|selectattr('status','eq','Paid')|list|length %}
+        {{ paid }} / {{ rows|length }}
+      </div>
+      <div class="stat-lbl">EMIs Paid</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="stat-card">
+      <div class="stat-val text-danger">
+        {% set overdue = rows|selectattr('status','eq','Overdue')|list|length %}
+        {{ overdue }}
+      </div>
+      <div class="stat-lbl">Overdue</div>
+    </div>
+  </div>
+  <div class="col-md-3">
+    <div class="stat-card">
+      <div class="stat-val">{{ loan.tenure }}m</div>
+      <div class="stat-lbl">Total Tenure</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table mb-0">
+      <thead>
+        <tr>
+          <th>#</th><th>Due Date</th><th>EMI Amount</th>
+          <th>Paid</th><th>Remaining</th><th>Status</th>
+          <th>Paid At</th>
+          {% if can_do('can_pay') %}<th>Action</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in rows %}
+        <tr class="{{ 'table-success' if e.status=='Paid' else 'table-danger' if e.status=='Overdue' else 'table-warning' if e.status=='Partial' else '' }}">
+          <td>{{ e.installment_no }}</td>
+          <td><span class="{{ 'text-danger fw-semibold' if e.status=='Overdue' else '' }}">{{ e.due_date }}</span></td>
+          <td>₹{{ '{:,.2f}'.format(e.emi_amount) }}</td>
+          <td>₹{{ '{:,.2f}'.format(e.amount_paid or 0) }}</td>
+          <td class="fw-semibold">₹{{ '{:,.2f}'.format(e.remaining_amount if e.remaining_amount is not none else e.emi_amount) }}</td>
+          <td>
+            <span class="status-pill
+              {{ 'status-paid' if e.status=='Paid' else
+                 'status-overdue' if e.status=='Overdue' else
+                 'status-partial' if e.status=='Partial' else
+                 'status-pending' }}">
+              {{ e.status }}
+            </span>
+          </td>
+          <td style="font-size:.8rem">{{ e.paid_at[:16] if e.paid_at else '—' }}</td>
+          {% if can_do('can_pay') %}
+          <td>
+            {% if e.status != 'Paid' %}
+            <button class="btn btn-sm btn-success"
+              data-bs-toggle="modal" data-bs-target="#payModal"
+              data-emiid="{{ e.emi_id }}"
+              data-rem="{{ e.remaining_amount if e.remaining_amount is not none else e.emi_amount }}"
+              data-inst="{{ e.installment_no }}">
+              <i class="bi bi-cash me-1"></i>Pay
+            </button>
+            {% else %}
+            <span class="text-success small"><i class="bi bi-check-circle"></i> Done</span>
+            {% endif %}
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if can_do('can_pay') %}
+<!-- Payment Modal -->
+<div class="modal fade" id="payModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content border-0" style="border-radius:16px;overflow:hidden">
+      <div class="modal-header" style="background:linear-gradient(135deg,#00844c,#005c35);color:#fff;border:none">
+        <h5 class="modal-title"><i class="bi bi-cash-stack me-2"></i>Record EMI Payment</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="POST" action="/emis/{{ loan_id }}">
+        <div class="modal-body p-4">
+          <div class="bg-light rounded p-3 mb-3">
+            <div class="row text-center">
+              <div class="col">
+                <div class="fw-bold text-primary fs-5" id="modal-inst">—</div>
+                <div class="text-muted small">Installment #</div>
+              </div>
+              <div class="col">
+                <div class="fw-bold text-danger fs-5" id="modal-rem">—</div>
+                <div class="text-muted small">Amount Due</div>
+              </div>
+            </div>
+          </div>
+          <input type="hidden" name="emi_id" id="modal_emi_id">
+          <div class="mb-3">
+            <label class="form-label">Amount to Pay (₹)</label>
+            <div class="input-group">
+              <span class="input-group-text">₹</span>
+              <input type="number" name="pay_amount" id="modal_pay_amount" step="0.01" class="form-control" required>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Extra Interest (₹) <span class="text-muted fw-normal">(if any)</span></label>
+            <div class="input-group">
+              <span class="input-group-text">₹</span>
+              <input type="number" name="extra_interest" step="0.01" class="form-control" value="0">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer border-0">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-success px-4"><i class="bi bi-check-lg me-1"></i>Confirm Payment</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+document.getElementById('payModal').addEventListener('show.bs.modal', function(e) {
+  var btn = e.relatedTarget;
+  document.getElementById('modal_emi_id').value = btn.dataset.emiid;
+  document.getElementById('modal_pay_amount').value = parseFloat(btn.dataset.rem).toFixed(2);
+  document.getElementById('modal-inst').textContent = '#' + btn.dataset.inst;
+  document.getElementById('modal-rem').textContent = '₹' + parseFloat(btn.dataset.rem).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+});
+</script>
+{% endif %}
+{% endblock %}

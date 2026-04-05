@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Closed Loans — Loan Manager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-archive me-2 text-secondary"></i>Closed Loans</h1>
+</div>
+<div class="card mb-3"><div class="card-body py-2 px-3">
+<form method="GET" class="d-flex gap-2">
+  <div class="search-box"><i class="bi bi-search search-icon"></i>
+  <input type="text" name="q" value="{{ q_ }}" class="form-control" placeholder="Search..."></div>
+  <button class="btn btn-primary btn-sm">Search</button>
+  <a href="/closed" class="btn btn-outline-secondary btn-sm">Clear</a>
+</form></div></div>
+<div class="card"><div class="table-responsive"><table class="table mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Vehicle</th><th>Loan Amount</th><th>Closed On</th></tr></thead>
+<tbody>
+{% for l in rows %}
+<tr>
+  <td class="fw-semibold text-primary">{{ l.loan_number }}</td>
+  <td>{{ l.customer_name }}</td>
+  <td>{{ l.vehicle_type }}</td>
+  <td class="fw-semibold">₹{{ '{:,.0f}'.format(l.loan_amount) }}</td>
+  <td><span class="badge bg-secondary">{{ l.closure_date }}</span></td>
+</tr>
+{% else %}
+<tr><td colspan="5" class="text-center text-muted py-4">
+  <i class="bi bi-archive fs-3 d-block mb-2"></i>No closed loans.
+</td></tr>
+{% endfor %}
+</tbody></table></div></div>
+{% endblock %}

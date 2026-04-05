@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}User Management — Loan Manager{% endblock %}
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title"><i class="bi bi-shield-lock me-2 text-primary"></i>User Management</h1>
+</div>
+<div class="row g-4">
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header primary"><i class="bi bi-person-plus me-2"></i>Add / Update User</div>
+      <div class="card-body">
+        <form method="POST" action="/users">
+          <div class="mb-3">
+            <label class="form-label">Username</label>
+            <input type="text" name="username" class="form-control" placeholder="Enter username" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Password</label>
+            <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+          </div>
+          <div class="mb-4">
+            <label class="form-label">Role</label>
+            <select name="role" class="form-select">
+              <option value="admin">Admin — Full access</option>
+              <option value="manager">Manager — Add, approve, pay</option>
+              <option value="viewer">Viewer — Read only</option>
+            </select>
+          </div>
+          <button type="submit" class="btn btn-primary w-100"><i class="bi bi-save me-2"></i>Save User</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Role Permissions Info -->
+    <div class="card mt-3">
+      <div class="card-header"><i class="bi bi-info-circle me-2"></i>Role Permissions</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0" style="font-size:.8rem">
+          <thead><tr><th>Permission</th><th class="text-center">Admin</th><th class="text-center">Manager</th><th class="text-center">Viewer</th></tr></thead>
+          <tbody>
+            <tr><td>Add Loans</td><td class="text-center text-success">✓</td><td class="text-center text-success">✓</td><td class="text-center text-danger">✗</td></tr>
+            <tr><td>Approve/Reject</td><td class="text-center text-success">✓</td><td class="text-center text-success">✓</td><td class="text-center text-danger">✗</td></tr>
+            <tr><td>Pay EMIs</td><td class="text-center text-success">✓</td><td class="text-center text-success">✓</td><td class="text-center text-danger">✗</td></tr>
+            <tr><td>View Reports</td><td class="text-center text-success">✓</td><td class="text-center text-success">✓</td><td class="text-center text-success">✓</td></tr>
+            <tr><td>User Management</td><td class="text-center text-success">✓</td><td class="text-center text-danger">✗</td><td class="text-center text-danger">✗</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header"><i class="bi bi-people me-2"></i>All Users ({{ rows|length }})</div>
+      <div class="table-responsive">
+        <table class="table mb-0">
+          <thead><tr><th>#</th><th>Username</th><th>Role</th><th>Created</th></tr></thead>
+          <tbody>
+          {% for u in rows %}
+          <tr>
+            <td class="text-muted">{{ u.user_id }}</td>
+            <td class="fw-semibold">{{ u.username }}</td>
+            <td><span class="role-badge role-{{ u.role }}">{{ u.role }}</span></td>
+            <td style="font-size:.8rem">{{ u.created_at[:10] }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
