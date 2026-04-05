@@ -1,69 +1,38 @@
-# app.py  — Version 7.0  (Cloud-Ready)
-# Enhancements over V6.0:
-#   ✅ Cloud Database support  (PostgreSQL via DATABASE_URL env var)
-#   ✅ SQLite fallback locally  (zero config for local dev)
-#   ✅ Render / Railway / Heroku / Supabase ready
-#   ✅ User Roles & Permissions  (Admin / Manager / Viewer)
-#   ✅ Search & Filter in every table (live, debounced)
-#   ✅ PDF Report Generation      (reportlab)
-#   ✅ Email Notifications         (SMTP via smtplib)
-#   ✅ Flask Web App               (--web flag)
+# =============================================================================
+# app.py  —  Vehicle Loan Manager  (Pure Flask Web App, v8.0)
+# =============================================================================
+# Features:
+#   ✅ Full Flask web app (no Tkinter)
+#   ✅ PostgreSQL (cloud) + SQLite (local) — auto-detected via DATABASE_URL
+#   ✅ User roles: Admin / Manager / Viewer
+#   ✅ Loan entry, approval, rejection
+#   ✅ EMI schedule generation and payments (full + partial)
+#   ✅ Overdue and upcoming EMI alerts
+#   ✅ PDF report generation (reportlab)
+#   ✅ Email notifications (SMTP)
+#   ✅ Search and filter on every page
+#   ✅ Loan calculator with amortization
+#   ✅ Dashboard with KPI cards
+#   ✅ CSV export
+#   ✅ Render / Railway / Heroku ready
 #
-# ── Local development ──────────────────────────────────────────────────────
-# Usage (desktop):  python app.py
-# Usage (web):      python app.py --web
-#
-# ── Cloud deployment (Render / Railway) ───────────────────────────────────
-# Set these environment variables on your hosting platform:
-#   DATABASE_URL  = postgresql://user:pass@host:5432/dbname   (from Supabase/Neon/Railway)
-#   SECRET_KEY    = any-random-string
-#
-# ── Install dependencies ───────────────────────────────────────────────────
+# Local dev:
 #   pip install -r requirements.txt
+#   python app.py
+#
+# Cloud deploy (Render):
+#   Set env vars: DATABASE_URL, SECRET_KEY
+#   Start command: gunicorn "app:create_app()"
+# =============================================================================
 
-import sys
-import os
-import csv
-import math
-import shutil
-import smtplib
-import threading
-import time
-import calendar
+import os, csv, io, math, hashlib, secrets, threading, smtplib, calendar
 import sqlite3
-import hashlib
-import secrets
 from datetime import date, datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
-# ── optional libs ────────────────────────────────────────────────────────────
-try:
-    import numpy as np
-    NUMPY_AVAILABLE = True
-except Exception:
-    NUMPY_AVAILABLE = False
-
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-    import pandas as pd
-    GOOGLE_AVAILABLE = True
-except ImportError:
-    GOOGLE_AVAILABLE = False
-
-try:
-    import matplotlib
-    try:
-        matplotlib.use("TkAgg")
-    except Exception:
-        matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    from matplotlib.backends.backend_pdf import PdfPages
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+from functools import wraps
+from flask import (Flask, render_template_string, request, redirect,
+                   session, flash, send_file, make_response, jsonify)
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -76,69 +45,48 @@ try:
 except ImportError:
     REPORTLAB_AVAILABLE = False
 
-# ── config ───────────────────────────────────────────────────────────────────
-DB_FILE        = "vehicle_loans_v6.db"   # used only when no DATABASE_URL is set
+# =============================================================================
+# CONFIG
+# =============================================================================
+DB_FILE       = "vehicle_loans.db"
+UPCOMING_DAYS = 10
 
-# ── Cloud DB setup ────────────────────────────────────────────────────────────
-# Reads DATABASE_URL from environment (set on Render/Railway/Heroku).
-# Falls back to local SQLite when not set (local development).
 _DATABASE_URL = os.environ.get("DATABASE_URL", "")
-if _DATABASE_URL.startswith("postgres://"):          # Heroku/Supabase use this prefix
+if _DATABASE_URL.startswith("postgres://"):
     _DATABASE_URL = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
 USE_POSTGRES = _DATABASE_URL.startswith("postgresql")
 
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")
-GOOGLE_JSON_KEYFILE = "credentials.json"
-GOOGLE_SHEET_ID     = "1VrKT2yX0BCZj7Cns-Of1Nkng-Cq8kHT_tXNCCHzmO5k"
-UPCOMING_DAYS  = 10
-ATTACHMENTS_DIR = "attachments"
-os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
-
-# Email settings  (update with your SMTP details)
 EMAIL_CONFIG = {
-    "smtp_host": "smtp.gmail.com",
-    "smtp_port": 587,
-    "sender":    "youremail@gmail.com",
-    "password":  "your_app_password",
-    "enabled":   False,   # set True once configured
+    "smtp_host": os.environ.get("SMTP_HOST", "smtp.gmail.com"),
+    "smtp_port": int(os.environ.get("SMTP_PORT", 587)),
+    "sender":    os.environ.get("SMTP_EMAIL", ""),
+    "password":  os.environ.get("SMTP_PASSWORD", ""),
+    "enabled":   os.environ.get("SMTP_ENABLED", "false").lower() == "true",
 }
 
-CHART_COLORS = {
-    "primary":    "#0057b8",
-    "secondary":  "#00844c",
-    "danger":     "#d7263d",
-    "background": "light",
-}
-
-# ── roles ─────────────────────────────────────────────────────────────────────
 ROLES = {
-    "admin":   {"label": "Admin",   "can_approve": True,  "can_reject": True,  "can_add": True,  "can_pay": True,  "can_report": True},
-    "manager": {"label": "Manager", "can_approve": True,  "can_reject": True,  "can_add": True,  "can_pay": True,  "can_report": True},
-    "viewer":  {"label": "Viewer",  "can_approve": False, "can_reject": False, "can_add": False, "can_pay": False, "can_report": True},
+    "admin":   {"can_approve":True,  "can_reject":True,  "can_add":True,  "can_pay":True,  "can_report":True,  "can_users":True},
+    "manager": {"can_approve":True,  "can_reject":True,  "can_add":True,  "can_pay":True,  "can_report":True,  "can_users":False},
+    "viewer":  {"can_approve":False, "can_reject":False, "can_add":False, "can_pay":False, "can_report":True,  "can_users":False},
 }
 
-# Default users (hashed passwords).  Password == username for defaults.
 DEFAULT_USERS = {
-    "admin":   {"role": "admin",   "pw_hash": hashlib.sha256(b"admin123").hexdigest()},
-    "manager": {"role": "manager", "pw_hash": hashlib.sha256(b"manager123").hexdigest()},
-    "viewer":  {"role": "viewer",  "pw_hash": hashlib.sha256(b"viewer123").hexdigest()},
+    "admin":   {"role":"admin",   "pw_hash":hashlib.sha256(b"admin123").hexdigest()},
+    "manager": {"role":"manager", "pw_hash":hashlib.sha256(b"manager123").hexdigest()},
+    "viewer":  {"role":"viewer",  "pw_hash":hashlib.sha256(b"viewer123").hexdigest()},
 }
 
-# ── thread-local DB connections ───────────────────────────────────────────────
-# Supports both SQLite (local) and PostgreSQL (cloud) transparently.
+# =============================================================================
+# DATABASE LAYER
+# =============================================================================
 _local = threading.local()
 
 def get_conn():
     if not hasattr(_local, "conn") or _local.conn is None:
         if USE_POSTGRES:
-            try:
-                import psycopg2
-                import psycopg2.extras
-                _local.conn = psycopg2.connect(_DATABASE_URL)
-                _local.conn.autocommit = False
-            except ImportError:
-                raise RuntimeError(
-                    "psycopg2 not installed. Add psycopg2-binary to requirements.txt")
+            import psycopg2, psycopg2.extras
+            _local.conn = psycopg2.connect(_DATABASE_URL)
+            _local.conn.autocommit = False
         else:
             _local.conn = sqlite3.connect(DB_FILE, check_same_thread=False)
             _local.conn.row_factory = sqlite3.Row
@@ -151,1000 +99,535 @@ def get_cur():
         return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     return conn.cursor()
 
-def _commit():
-    """Commit current connection (handles both SQLite and PostgreSQL)."""
-    conn = get_conn()
-    if USE_POSTGRES:
-        conn.commit()
-    else:
-        conn.commit()
+def db_commit(): get_conn().commit()
 
-def _placeholder():
-    """Return the correct SQL placeholder for the current DB."""
-    return "%s" if USE_POSTGRES else "?"
+def q(sql): return sql.replace("?", "%s") if USE_POSTGRES else sql
 
-def _adapt_sql(sql: str) -> str:
-    """Convert SQLite ? placeholders to PostgreSQL %s if needed."""
-    if USE_POSTGRES:
-        return sql.replace("?", "%s")
-    return sql
+def scalar(cur, sql, params=()):
+    cur.execute(q(sql), params)
+    row = cur.fetchone()
+    if row is None: return 0
+    v = list(row.values())[0] if isinstance(row, dict) else row[0]
+    return v or 0
 
-def _fetchrow_as_dict(row):
-    """Ensure a fetched row behaves like a dict (both SQLite Row and psycopg2 RealDictRow do)."""
-    return row
+# =============================================================================
+# UTILITIES
+# =============================================================================
+def parse_date(s): return datetime.strptime(s, "%Y-%m-%d").date()
 
-# ── utilities ─────────────────────────────────────────────────────────────────
-def parse_date(s):
-    return datetime.strptime(s, "%Y-%m-%d").date()
-
-def to_iso(d):
-    return d.isoformat() if isinstance(d, date) else d
-
-def add_months(sourcedate, months):
-    month = sourcedate.month - 1 + months
-    year  = sourcedate.year + month // 12
+def add_months(d, months):
+    month = d.month - 1 + months
+    year  = d.year + month // 12
     month = month % 12 + 1
-    day   = min(sourcedate.day, calendar.monthrange(year, month)[1])
-    return date(year, month, day)
+    return date(year, month, min(d.day, calendar.monthrange(year, month)[1]))
 
 def normalize_interest(rate):
     try:
-        r = float(rate)
-    except Exception:
-        return None
-    return r / 100.0 if r > 1 else r
+        r = float(rate); return r / 100.0 if r > 1 else r
+    except Exception: return None
 
-def compute_emi_amount(loan_amount, annual_interest_decimal, tenure_months):
-    total = loan_amount + (loan_amount * annual_interest_decimal * (tenure_months / 12.0))
+def compute_emi(loan_amount, annual_rate, tenure_months):
+    total = loan_amount + loan_amount * annual_rate * (tenure_months / 12.0)
     return round(total / tenure_months, 2)
 
-def linear_fit(xs, ys):
-    n = len(xs)
-    if n == 0:
-        return 0.0, 0.0
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
-    den = sum((x - mean_x) ** 2 for x in xs)
-    slope = num / den if den else 0.0
-    return slope, mean_y - slope * mean_x
+def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
+def can_do(action): return ROLES.get(session.get("role"), {}).get(action, False)
 
-def hash_pw(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
-
-# ── DB initialisation ─────────────────────────────────────────────────────────
+# =============================================================================
+# DB INIT
+# =============================================================================
 def init_db():
     c = get_cur()
     if USE_POSTGRES:
-        # PostgreSQL uses SERIAL instead of AUTOINCREMENT
-        statements = [
+        stmts = [
             """CREATE TABLE IF NOT EXISTS LoanEntry (
-                id SERIAL PRIMARY KEY,
-                loan_number TEXT UNIQUE,
-                customer_name TEXT,
-                vehicle_type TEXT,
-                loan_amount REAL,
-                interest_rate REAL,
-                tenure INTEGER,
-                start_date TEXT,
-                status TEXT,
-                created_at TEXT,
-                attachment TEXT,
-                customer_email TEXT
-            )""",
+                id SERIAL PRIMARY KEY, loan_number TEXT UNIQUE, customer_name TEXT,
+                vehicle_type TEXT, loan_amount REAL, interest_rate REAL, tenure INTEGER,
+                start_date TEXT, status TEXT, created_at TEXT, customer_email TEXT)""",
             """CREATE TABLE IF NOT EXISTS Customers (
-                customer_id SERIAL PRIMARY KEY,
-                loan_id INTEGER UNIQUE,
-                name TEXT,
-                vehicle_type TEXT,
-                loan_amount REAL,
-                emi_amount REAL,
-                status TEXT,
-                created_at TEXT,
-                FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-            )""",
+                customer_id SERIAL PRIMARY KEY, loan_id INTEGER UNIQUE, name TEXT,
+                vehicle_type TEXT, loan_amount REAL, emi_amount REAL, status TEXT, created_at TEXT)""",
             """CREATE TABLE IF NOT EXISTS EMI (
-                emi_id SERIAL PRIMARY KEY,
-                loan_id INTEGER,
-                installment_no INTEGER,
-                due_date TEXT,
-                emi_amount REAL,
-                status TEXT,
-                paid_at TEXT,
-                amount_paid REAL,
-                remaining_amount REAL,
-                extra_interest REAL,
-                FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-            )""",
+                emi_id SERIAL PRIMARY KEY, loan_id INTEGER, installment_no INTEGER,
+                due_date TEXT, emi_amount REAL, status TEXT, paid_at TEXT,
+                amount_paid REAL, remaining_amount REAL, extra_interest REAL)""",
             """CREATE TABLE IF NOT EXISTS RejectedLoans (
-                reject_id SERIAL PRIMARY KEY,
-                loan_id INTEGER UNIQUE,
-                reason TEXT,
-                created_at TEXT,
-                FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-            )""",
+                reject_id SERIAL PRIMARY KEY, loan_id INTEGER UNIQUE, reason TEXT, created_at TEXT)""",
             """CREATE TABLE IF NOT EXISTS ClosedLoans (
-                close_id SERIAL PRIMARY KEY,
-                loan_id INTEGER UNIQUE,
-                closure_date TEXT,
-                created_at TEXT,
-                FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-            )""",
+                close_id SERIAL PRIMARY KEY, loan_id INTEGER UNIQUE, closure_date TEXT, created_at TEXT)""",
             """CREATE TABLE IF NOT EXISTS Users (
-                user_id SERIAL PRIMARY KEY,
-                username TEXT UNIQUE,
-                pw_hash TEXT,
-                role TEXT,
-                created_at TEXT
-            )""",
+                user_id SERIAL PRIMARY KEY, username TEXT UNIQUE, pw_hash TEXT, role TEXT, created_at TEXT)""",
         ]
-        for stmt in statements:
-            c.execute(stmt)
-        get_conn().commit()
+        for s in stmts: c.execute(s)
+        db_commit()
+        for uname, info in DEFAULT_USERS.items():
+            c.execute("INSERT INTO Users (username,pw_hash,role,created_at) VALUES (%s,%s,%s,%s) ON CONFLICT(username) DO NOTHING",
+                      (uname, info["pw_hash"], info["role"], datetime.now(timezone.utc).isoformat()))
     else:
-        # SQLite supports executescript with AUTOINCREMENT
         c.executescript("""
         CREATE TABLE IF NOT EXISTS LoanEntry (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loan_number TEXT UNIQUE,
-            customer_name TEXT,
-            vehicle_type TEXT,
-            loan_amount REAL,
-            interest_rate REAL,
-            tenure INTEGER,
-            start_date TEXT,
-            status TEXT,
-            created_at TEXT,
-            attachment TEXT,
-            customer_email TEXT
-        );
+            id INTEGER PRIMARY KEY AUTOINCREMENT, loan_number TEXT UNIQUE, customer_name TEXT,
+            vehicle_type TEXT, loan_amount REAL, interest_rate REAL, tenure INTEGER,
+            start_date TEXT, status TEXT, created_at TEXT, customer_email TEXT);
         CREATE TABLE IF NOT EXISTS Customers (
-            customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loan_id INTEGER UNIQUE,
-            name TEXT,
-            vehicle_type TEXT,
-            loan_amount REAL,
-            emi_amount REAL,
-            status TEXT,
-            created_at TEXT,
-            FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-        );
+            customer_id INTEGER PRIMARY KEY AUTOINCREMENT, loan_id INTEGER UNIQUE, name TEXT,
+            vehicle_type TEXT, loan_amount REAL, emi_amount REAL, status TEXT, created_at TEXT);
         CREATE TABLE IF NOT EXISTS EMI (
-            emi_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loan_id INTEGER,
-            installment_no INTEGER,
-            due_date TEXT,
-            emi_amount REAL,
-            status TEXT,
-            paid_at TEXT,
-            amount_paid REAL,
-            remaining_amount REAL,
-            extra_interest REAL,
-            FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-        );
+            emi_id INTEGER PRIMARY KEY AUTOINCREMENT, loan_id INTEGER, installment_no INTEGER,
+            due_date TEXT, emi_amount REAL, status TEXT, paid_at TEXT,
+            amount_paid REAL, remaining_amount REAL, extra_interest REAL);
         CREATE TABLE IF NOT EXISTS RejectedLoans (
-            reject_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loan_id INTEGER UNIQUE,
-            reason TEXT,
-            created_at TEXT,
-            FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-        );
+            reject_id INTEGER PRIMARY KEY AUTOINCREMENT, loan_id INTEGER UNIQUE, reason TEXT, created_at TEXT);
         CREATE TABLE IF NOT EXISTS ClosedLoans (
-            close_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            loan_id INTEGER UNIQUE,
-            closure_date TEXT,
-            created_at TEXT,
-            FOREIGN KEY(loan_id) REFERENCES LoanEntry(id)
-        );
+            close_id INTEGER PRIMARY KEY AUTOINCREMENT, loan_id INTEGER UNIQUE, closure_date TEXT, created_at TEXT);
         CREATE TABLE IF NOT EXISTS Users (
-            user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE,
-            pw_hash TEXT,
-            role TEXT,
-            created_at TEXT
-        );
+            user_id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE, pw_hash TEXT, role TEXT, created_at TEXT);
         """)
-        get_conn().commit()
+        db_commit()
+        for uname, info in DEFAULT_USERS.items():
+            c.execute("INSERT OR IGNORE INTO Users (username,pw_hash,role,created_at) VALUES (?,?,?,?)",
+                      (uname, info["pw_hash"], info["role"], datetime.now(timezone.utc).isoformat()))
+    db_commit()
 
-    # seed default users
+# =============================================================================
+# DB OPERATIONS
+# =============================================================================
+def authenticate_user(username, password):
     c = get_cur()
-    for uname, info in DEFAULT_USERS.items():
-        if USE_POSTGRES:
-            c.execute(
-                "INSERT INTO Users (username,pw_hash,role,created_at) VALUES (%s,%s,%s,%s) ON CONFLICT(username) DO NOTHING",
-                (uname, info["pw_hash"], info["role"], datetime.now(timezone.utc).isoformat()))
-        else:
-            c.execute(
-                "INSERT OR IGNORE INTO Users (username,pw_hash,role,created_at) VALUES (?,?,?,?)",
-                (uname, info["pw_hash"], info["role"], datetime.now(timezone.utc).isoformat()))
-    get_conn().commit()
-
-init_db()
-
-# ── DB helpers ────────────────────────────────────────────────────────────────
-def authenticate_user(username: str, password: str):
-    c = get_cur()
-    c.execute(_adapt_sql("SELECT * FROM Users WHERE username=?"), (username,))
+    c.execute(q("SELECT * FROM Users WHERE username=?"), (username,))
     row = c.fetchone()
-    if row and row["pw_hash"] == hash_pw(password):
-        return dict(row)
+    if row and row["pw_hash"] == hash_pw(password): return dict(row)
     return None
 
-def can_do(session_role: str, action: str) -> bool:
-    return ROLES.get(session_role, {}).get(action, False)
-
-def can_pay_emi(loan_id, installment_no):
+def can_pay_seq(loan_id, installment_no):
+    if installment_no == 1: return True
     c = get_cur()
-    if installment_no == 1:
-        return True
-    c.execute(_adapt_sql("""SELECT COUNT(*) as n FROM EMI
-                 WHERE loan_id=? AND installment_no<? AND status!='Paid'"""),
-              (loan_id, installment_no))
+    c.execute(q("SELECT COUNT(*) as n FROM EMI WHERE loan_id=? AND installment_no<? AND status!='Paid'"), (loan_id, installment_no))
     row = c.fetchone()
-    n = row["n"] if isinstance(row, dict) else row[0]
-    return n == 0
+    return (row["n"] if isinstance(row, dict) else row[0]) == 0
 
-def create_loan_entry(loan_number, customer_name, vehicle_type,
-                      loan_amount, interest_rate_raw, tenure,
-                      start_date_iso, attachment_path=None, customer_email=""):
+def create_loan(loan_number, customer_name, vehicle_type, loan_amount, interest_rate_raw, tenure, start_date_iso, customer_email=""):
     r = normalize_interest(interest_rate_raw)
-    if r is None:
-        raise ValueError("Invalid interest rate")
+    if r is None: raise ValueError("Invalid interest rate")
     c = get_cur()
-    c.execute(_adapt_sql("""INSERT INTO LoanEntry
-                 (loan_number,customer_name,vehicle_type,loan_amount,
-                  interest_rate,tenure,start_date,status,created_at,attachment,customer_email)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?)"""),
-              (loan_number, customer_name, vehicle_type,
-               float(loan_amount), float(r), int(tenure),
-               start_date_iso, "PendingApproval",
-               datetime.now(timezone.utc).isoformat(),
-               attachment_path, customer_email))
-    get_conn().commit()
-    if USE_POSTGRES:
-        c.execute("SELECT lastval()")
-        return c.fetchone()[0]
-    return c.lastrowid
+    c.execute(q("INSERT INTO LoanEntry (loan_number,customer_name,vehicle_type,loan_amount,interest_rate,tenure,start_date,status,created_at,customer_email) VALUES (?,?,?,?,?,?,?,?,?,?)"),
+              (loan_number, customer_name, vehicle_type, float(loan_amount), float(r), int(tenure), start_date_iso, "PendingApproval", datetime.now(timezone.utc).isoformat(), customer_email))
+    db_commit()
 
 def approve_loan(loan_id):
     c = get_cur()
-    c.execute(_adapt_sql("SELECT * FROM LoanEntry WHERE id=?"), (loan_id,))
+    c.execute(q("SELECT * FROM LoanEntry WHERE id=?"), (loan_id,))
     loan = c.fetchone()
-    if not loan:
-        raise ValueError("Loan not found")
-    if loan["status"] != "PendingApproval":
-        raise ValueError("Loan is not pending approval")
-    emi_amt = compute_emi_amount(float(loan["loan_amount"]),
-                                 float(loan["interest_rate"]),
-                                 int(loan["tenure"]))
+    if not loan: raise ValueError("Loan not found")
+    if loan["status"] != "PendingApproval": raise ValueError("Not pending approval")
+    emi_amt = compute_emi(float(loan["loan_amount"]), float(loan["interest_rate"]), int(loan["tenure"]))
     now = datetime.now(timezone.utc).isoformat()
     if USE_POSTGRES:
-        c.execute("""INSERT INTO Customers
-                     (loan_id,name,vehicle_type,loan_amount,emi_amount,status,created_at)
-                     VALUES (%s,%s,%s,%s,%s,%s,%s)
-                     ON CONFLICT(loan_id) DO UPDATE SET
-                     name=EXCLUDED.name, emi_amount=EXCLUDED.emi_amount,
-                     status=EXCLUDED.status""",
-                  (loan_id, loan["customer_name"], loan["vehicle_type"],
-                   loan["loan_amount"], emi_amt, "Active", now))
+        c.execute("INSERT INTO Customers (loan_id,name,vehicle_type,loan_amount,emi_amount,status,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(loan_id) DO UPDATE SET emi_amount=EXCLUDED.emi_amount,status=EXCLUDED.status",
+                  (loan_id, loan["customer_name"], loan["vehicle_type"], loan["loan_amount"], emi_amt, "Active", now))
     else:
-        c.execute("""INSERT OR REPLACE INTO Customers
-                     (loan_id,name,vehicle_type,loan_amount,emi_amount,status,created_at)
-                     VALUES (?,?,?,?,?,?,?)""",
-                  (loan_id, loan["customer_name"], loan["vehicle_type"],
-                   loan["loan_amount"], emi_amt, "Active", now))
-    try:
-        sd = parse_date(loan["start_date"])
-    except Exception:
-        sd = date.today()
+        c.execute("INSERT OR REPLACE INTO Customers (loan_id,name,vehicle_type,loan_amount,emi_amount,status,created_at) VALUES (?,?,?,?,?,?,?)",
+                  (loan_id, loan["customer_name"], loan["vehicle_type"], loan["loan_amount"], emi_amt, "Active", now))
+    try: sd = parse_date(loan["start_date"])
+    except Exception: sd = date.today()
     for i in range(1, int(loan["tenure"]) + 1):
-        c.execute(_adapt_sql("""INSERT INTO EMI
-                     (loan_id,installment_no,due_date,emi_amount,
-                      status,paid_at,amount_paid,remaining_amount,extra_interest)
-                     VALUES (?,?,?,?,?,?,?,?,?)"""),
-                  (loan_id, i, add_months(sd, i-1).isoformat(),
-                   emi_amt, "Pending", None, 0.0, emi_amt, 0.0))
-    c.execute(_adapt_sql("UPDATE LoanEntry SET status='Approved' WHERE id=?"), (loan_id,))
-    get_conn().commit()
+        c.execute(q("INSERT INTO EMI (loan_id,installment_no,due_date,emi_amount,status,paid_at,amount_paid,remaining_amount,extra_interest) VALUES (?,?,?,?,?,?,?,?,?)"),
+                  (loan_id, i, add_months(sd, i-1).isoformat(), emi_amt, "Pending", None, 0.0, emi_amt, 0.0))
+    c.execute(q("UPDATE LoanEntry SET status='Approved' WHERE id=?"), (loan_id,))
+    db_commit()
     _notify_approval(loan)
-    return True
 
 def reject_loan(loan_id, reason):
     c = get_cur()
-    c.execute(_adapt_sql("SELECT id FROM LoanEntry WHERE id=?"), (loan_id,))
-    if not c.fetchone():
-        raise ValueError("Loan not found")
-    c.execute(_adapt_sql("UPDATE LoanEntry SET status='Rejected' WHERE id=?"), (loan_id,))
+    c.execute(q("UPDATE LoanEntry SET status='Rejected' WHERE id=?"), (loan_id,))
     if USE_POSTGRES:
-        c.execute("""INSERT INTO RejectedLoans (loan_id,reason,created_at)
-                     VALUES (%s,%s,%s) ON CONFLICT(loan_id) DO UPDATE SET
-                     reason=EXCLUDED.reason, created_at=EXCLUDED.created_at""",
+        c.execute("INSERT INTO RejectedLoans (loan_id,reason,created_at) VALUES (%s,%s,%s) ON CONFLICT(loan_id) DO UPDATE SET reason=EXCLUDED.reason",
                   (loan_id, reason, datetime.now(timezone.utc).isoformat()))
     else:
-        c.execute("""INSERT OR REPLACE INTO RejectedLoans (loan_id,reason,created_at)
-                     VALUES (?,?,?)""",
+        c.execute("INSERT OR REPLACE INTO RejectedLoans (loan_id,reason,created_at) VALUES (?,?,?)",
                   (loan_id, reason, datetime.now(timezone.utc).isoformat()))
-    get_conn().commit()
-    return True
+    db_commit()
 
-def pay_emi(emi_id, pay_amount=None, extra_interest=0.0):
-    c   = get_cur()
+def pay_emi_db(emi_id, pay_amount, extra_interest=0.0):
+    c = get_cur()
     now = datetime.now(timezone.utc).isoformat()
-    c.execute(_adapt_sql("SELECT * FROM EMI WHERE emi_id=?"), (emi_id,))
+    c.execute(q("SELECT * FROM EMI WHERE emi_id=?"), (emi_id,))
     emi = c.fetchone()
-    if not emi:
-        raise ValueError("EMI not found")
-    if emi["status"] == "Paid":
-        raise ValueError("EMI already paid")
-    if not can_pay_emi(emi["loan_id"], emi["installment_no"]):
-        raise ValueError(f"Cannot pay installment {emi['installment_no']}. "
-                         "Please complete previous installments first.")
-    amount_paid = emi["amount_paid"] or 0.0
+    if not emi: raise ValueError("EMI not found")
+    if emi["status"] == "Paid": raise ValueError("Already paid")
+    if not can_pay_seq(emi["loan_id"], emi["installment_no"]):
+        raise ValueError(f"Complete installment {emi['installment_no']-1} first")
+    paid_so_far = emi["amount_paid"] or 0.0
     remaining   = emi["remaining_amount"] if emi["remaining_amount"] is not None else emi["emi_amount"]
-    if pay_amount is None:
-        pay_amount = remaining
-    total_due = remaining + (extra_interest or 0.0)
+    total_due   = remaining + (extra_interest or 0.0)
     if pay_amount < total_due:
-        new_paid      = amount_paid + pay_amount
-        new_remaining = total_due - pay_amount
-        c.execute(_adapt_sql("UPDATE EMI SET amount_paid=?,remaining_amount=?,extra_interest=?,status=? WHERE emi_id=?"),
-                  (new_paid, new_remaining, extra_interest, "Partial", emi_id))
-        get_conn().commit()
-        return f"Partial payment recorded. Remaining due: ₹{new_remaining:.2f}"
-    else:
-        c.execute(_adapt_sql("""UPDATE EMI SET status='Paid',paid_at=?,amount_paid=?,
-                     remaining_amount=0,extra_interest=0 WHERE emi_id=?"""),
-                  (now, amount_paid + pay_amount, emi_id))
-        get_conn().commit()
-        loan_id = emi["loan_id"]
-        c.execute(_adapt_sql("""SELECT COUNT(*) as total,
-                     SUM(CASE WHEN status='Paid' THEN 1 ELSE 0 END) as paidcount
-                     FROM EMI WHERE loan_id=?"""), (loan_id,))
-        counts = c.fetchone()
-        total     = counts["total"]     if isinstance(counts, dict) else counts[0]
-        paidcount = counts["paidcount"] if isinstance(counts, dict) else counts[1]
-        if total and paidcount and total > 0 and paidcount == total:
-            c.execute(_adapt_sql("UPDATE LoanEntry SET status='Closed' WHERE id=?"), (loan_id,))
-            c.execute(_adapt_sql("UPDATE Customers SET status='Closed' WHERE loan_id=?"), (loan_id,))
-            if USE_POSTGRES:
-                c.execute("""INSERT INTO ClosedLoans (loan_id,closure_date,created_at)
-                             VALUES (%s,%s,%s) ON CONFLICT(loan_id) DO NOTHING""",
-                          (loan_id, date.today().isoformat(),
-                           datetime.now(timezone.utc).isoformat()))
-            else:
-                c.execute("""INSERT OR REPLACE INTO ClosedLoans (loan_id,closure_date,created_at)
-                             VALUES (?,?,?)""",
-                          (loan_id, date.today().isoformat(),
-                           datetime.now(timezone.utc).isoformat()))
-            get_conn().commit()
-            _notify_closure(loan_id)
-        return "EMI paid successfully!"
+        c.execute(q("UPDATE EMI SET amount_paid=?,remaining_amount=?,extra_interest=?,status='Partial' WHERE emi_id=?"),
+                  (paid_so_far + pay_amount, total_due - pay_amount, extra_interest, emi_id))
+        db_commit()
+        return f"Partial payment saved. Remaining: Rs {total_due - pay_amount:.2f}"
+    c.execute(q("UPDATE EMI SET status='Paid',paid_at=?,amount_paid=?,remaining_amount=0,extra_interest=0 WHERE emi_id=?"),
+              (now, paid_so_far + pay_amount, emi_id))
+    db_commit()
+    loan_id = emi["loan_id"]
+    c.execute(q("SELECT COUNT(*) as t, SUM(CASE WHEN status='Paid' THEN 1 ELSE 0 END) as p FROM EMI WHERE loan_id=?"), (loan_id,))
+    row = c.fetchone()
+    total = row["t"] if isinstance(row, dict) else row[0]
+    paid  = row["p"] if isinstance(row, dict) else row[1]
+    if total and paid and total == paid:
+        c.execute(q("UPDATE LoanEntry SET status='Closed' WHERE id=?"), (loan_id,))
+        c.execute(q("UPDATE Customers SET status='Closed' WHERE loan_id=?"), (loan_id,))
+        if USE_POSTGRES:
+            c.execute("INSERT INTO ClosedLoans (loan_id,closure_date,created_at) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                      (loan_id, date.today().isoformat(), now))
+        else:
+            c.execute("INSERT OR REPLACE INTO ClosedLoans (loan_id,closure_date,created_at) VALUES (?,?,?)",
+                      (loan_id, date.today().isoformat(), now))
+        db_commit()
+        _notify_closure(loan_id)
+    return "EMI paid successfully!"
 
-# ── query helpers ─────────────────────────────────────────────────────────────
-def list_pending_loans(search=""):
+def flag_overdues():
+    today = date.today().isoformat()
     c = get_cur()
-    q = f"%{search}%"
-    c.execute(_adapt_sql("""SELECT * FROM LoanEntry WHERE status='PendingApproval'
-                 AND (loan_number LIKE ? OR customer_name LIKE ? OR vehicle_type LIKE ?)
-                 ORDER BY created_at DESC"""), (q, q, q))
-    return c.fetchall()
+    c.execute(q("UPDATE EMI SET status='Overdue' WHERE status IN ('Pending','Partial') AND due_date<? AND (remaining_amount>0 OR remaining_amount IS NULL)"), (today,))
+    db_commit()
 
-def list_customers(search=""):
+# =============================================================================
+# QUERIES
+# =============================================================================
+def get_loans(search="", status=None):
     c = get_cur()
-    q = f"%{search}%"
-    c.execute(_adapt_sql("""SELECT * FROM Customers
-                 WHERE name LIKE ? OR vehicle_type LIKE ? OR status LIKE ?
-                 ORDER BY created_at DESC"""), (q, q, q))
+    qp = f"%{search}%"
+    sql = "SELECT * FROM LoanEntry WHERE (loan_number LIKE ? OR customer_name LIKE ? OR vehicle_type LIKE ?)"
+    params = [qp, qp, qp]
+    if status: sql += " AND status=?"; params.append(status)
+    sql += " ORDER BY created_at DESC"
+    c.execute(q(sql), params); return c.fetchall()
+
+def get_customers(search=""):
+    c = get_cur(); qp = f"%{search}%"
+    c.execute(q("SELECT * FROM Customers WHERE name LIKE ? OR vehicle_type LIKE ? OR status LIKE ? ORDER BY created_at DESC"), (qp,qp,qp))
     return c.fetchall()
 
 def get_emis_for_loan(loan_id):
     c = get_cur()
-    c.execute(_adapt_sql("SELECT * FROM EMI WHERE loan_id=? ORDER BY installment_no ASC"), (loan_id,))
-    return c.fetchall()
-
-def list_closed_loans(search=""):
-    c = get_cur()
-    q = f"%{search}%"
-    c.execute(_adapt_sql("""SELECT le.id as loan_id, le.loan_number, le.customer_name,
-                        le.vehicle_type, le.loan_amount, cl.closure_date
-                 FROM LoanEntry le JOIN ClosedLoans cl ON cl.loan_id=le.id
-                 WHERE le.loan_number LIKE ? OR le.customer_name LIKE ?
-                 ORDER BY cl.created_at DESC"""), (q, q))
-    return c.fetchall()
-
-def list_rejected_loans(search=""):
-    c = get_cur()
-    q = f"%{search}%"
-    c.execute(_adapt_sql("""SELECT le.id as loan_id, le.loan_number, le.customer_name,
-                        rl.reason, rl.created_at
-                 FROM LoanEntry le JOIN RejectedLoans rl ON rl.loan_id=le.id
-                 WHERE le.loan_number LIKE ? OR le.customer_name LIKE ?
-                 ORDER BY rl.created_at DESC"""), (q, q))
+    c.execute(q("SELECT * FROM EMI WHERE loan_id=? ORDER BY installment_no"), (loan_id,))
     return c.fetchall()
 
 def get_overdue_emis():
-    today = date.today().isoformat()
-    c = get_cur()
-    c.execute(_adapt_sql("""SELECT e.*, le.loan_number, le.customer_name
-                 FROM EMI e JOIN LoanEntry le ON e.loan_id=le.id
-                 WHERE e.status='Overdue'
-                    OR (e.status IN ('Pending','Partial') AND e.due_date < ?)
-                 ORDER BY e.due_date ASC"""), (today,))
+    today = date.today().isoformat(); c = get_cur()
+    c.execute(q("SELECT e.*, le.loan_number, le.customer_name FROM EMI e JOIN LoanEntry le ON e.loan_id=le.id WHERE e.status='Overdue' OR (e.status IN ('Pending','Partial') AND e.due_date<?) ORDER BY e.due_date"), (today,))
     return c.fetchall()
 
-def get_upcoming_emis(days=UPCOMING_DAYS):
-    today = date.today().isoformat()
-    limit = (date.today() + timedelta(days=days)).isoformat()
-    c = get_cur()
-    c.execute(_adapt_sql("""SELECT e.*, le.loan_number, le.customer_name
-                 FROM EMI e JOIN LoanEntry le ON e.loan_id=le.id
-                 WHERE e.status IN ('Pending','Partial')
-                   AND e.due_date >= ? AND e.due_date <= ?
-                 ORDER BY e.due_date ASC"""), (today, limit))
+def get_upcoming_emis():
+    today = date.today().isoformat(); limit = (date.today() + timedelta(days=UPCOMING_DAYS)).isoformat(); c = get_cur()
+    c.execute(q("SELECT e.*, le.loan_number, le.customer_name FROM EMI e JOIN LoanEntry le ON e.loan_id=le.id WHERE e.status IN ('Pending','Partial') AND e.due_date>=? AND e.due_date<=? ORDER BY e.due_date"), (today, limit))
     return c.fetchall()
 
-def get_loan_summary_counts():
+def get_kpis():
     c = get_cur()
-    def _count(sql, params=()):
-        c.execute(_adapt_sql(sql), params)
-        row = c.fetchone()
-        return (row[0] if not isinstance(row, dict) else list(row.values())[0]) or 0
     return dict(
-        total    = _count("SELECT COUNT(*) FROM LoanEntry"),
-        pending  = _count("SELECT COUNT(*) FROM LoanEntry WHERE status='PendingApproval'"),
-        approved = _count("SELECT COUNT(*) FROM LoanEntry WHERE status='Approved'"),
-        rejected = _count("SELECT COUNT(*) FROM LoanEntry WHERE status='Rejected'"),
-        closed   = _count("SELECT COUNT(*) FROM LoanEntry WHERE status='Closed'"),
+        total    = scalar(c, "SELECT COUNT(*) FROM LoanEntry"),
+        pending  = scalar(c, "SELECT COUNT(*) FROM LoanEntry WHERE status='PendingApproval'"),
+        approved = scalar(c, "SELECT COUNT(*) FROM LoanEntry WHERE status='Approved'"),
+        closed   = scalar(c, "SELECT COUNT(*) FROM LoanEntry WHERE status='Closed'"),
+        rejected = scalar(c, "SELECT COUNT(*) FROM LoanEntry WHERE status='Rejected'"),
+        disbursed= scalar(c, "SELECT SUM(loan_amount) FROM LoanEntry") or 0,
+        received = scalar(c, "SELECT SUM(emi_amount) FROM EMI WHERE status='Paid'") or 0,
+        pending_amt = scalar(c, "SELECT SUM(remaining_amount) FROM EMI WHERE status IN ('Pending','Partial','Overdue')") or 0,
         overdue  = len(get_overdue_emis()),
         upcoming = len(get_upcoming_emis()),
     )
 
-def get_kpi_totals(filters=None):
-    fsql, fparams = "", []
-    if filters:
-        if filters.get("start"):
-            fsql += " AND le.created_at >= ?"; fparams.append(filters["start"])
-        if filters.get("end"):
-            fsql += " AND le.created_at <= ?";  fparams.append(filters["end"])
-        if filters.get("ltype"):
-            fsql += " AND le.vehicle_type = ?"; fparams.append(filters["ltype"])
-        if filters.get("segment"):
-            fsql += " AND le.customer_name LIKE ?"; fparams.append(f"%{filters['segment']}%")
+def get_users():
     c = get_cur()
-    def _scalar(sql):
-        c.execute(_adapt_sql(sql), fparams)
-        row = c.fetchone()
-        v = (row[0] if not isinstance(row, dict) else list(row.values())[0])
-        return v or 0
-    tl  = _scalar(f"SELECT COUNT(*) FROM LoanEntry le WHERE 1=1 {fsql}")
-    tla = _scalar(f"SELECT SUM(loan_amount) FROM LoanEntry le WHERE 1=1 {fsql}")
-    tr  = _scalar(f"""SELECT SUM(e.emi_amount) FROM LoanEntry le
-                      JOIN EMI e ON le.id=e.loan_id WHERE e.status='Paid' {fsql}""")
-    tp  = _scalar(f"""SELECT SUM(e.emi_amount) FROM LoanEntry le
-                      JOIN EMI e ON le.id=e.loan_id
-                      WHERE e.status IN ('Pending','Overdue') {fsql}""")
-    return tl, tla, tr, tp
+    c.execute("SELECT user_id,username,role,created_at FROM Users ORDER BY user_id")
+    return c.fetchall()
 
-def get_monthly_paid_series(start=None, end=None, vehicle_type=None, segment=None):
-    fsql, params = "", []
-    if vehicle_type:
-        fsql += " AND le.vehicle_type=?"; params.append(vehicle_type)
-    if segment:
-        fsql += " AND le.customer_name LIKE ?"; params.append(f"%{segment}%")
-    if start:
-        fsql += " AND e.paid_at >= ?"; params.append(start)
-    if end:
-        fsql += " AND e.paid_at <= ?"; params.append(end)
-    c = get_cur()
-    if USE_POSTGRES:
-        date_fmt = "to_char(e.paid_at::timestamp, 'YYYY-MM')"
-    else:
-        date_fmt = "strftime('%Y-%m',e.paid_at)"
-    c.execute(_adapt_sql(f"""SELECT {date_fmt} as ym, SUM(e.emi_amount) as amt
-                  FROM EMI e JOIN LoanEntry le ON e.loan_id=le.id
-                  WHERE e.status='Paid' AND e.paid_at IS NOT NULL {fsql}
-                  GROUP BY ym ORDER BY ym ASC"""), params)
-    rows = c.fetchall()
-    months, amounts = [], []
-    for r in rows:
-        months.append(r["ym"]); amounts.append(r["amt"] or 0.0)
-    return months, amounts
-
-def compute_mom_yoy(months, amounts):
-    mom, yoy, m2a = {}, {}, dict(zip(months, amounts))
-    for i, m in enumerate(months):
-        mom[m] = (amounts[i]-amounts[i-1])/amounts[i-1]*100 if i > 0 and amounts[i-1] else None
-        try:
-            y, mm = m.split("-")
-            pm = f"{int(y)-1}-{mm}"
-            pa = m2a.get(pm)
-            yoy[m] = (m2a[m]-pa)/pa*100 if pa else None
-        except Exception:
-            yoy[m] = None
-    return mom, yoy
-
-def forecast_payments(months, amounts, months_ahead=6):
-    if not months or not amounts:
-        base = date.today()
-        labels = [add_months(base, i).strftime("%Y-%m") for i in range(1, months_ahead+1)]
-        return labels, [0.0]*months_ahead
-    xs = list(range(len(months)))
-    if NUMPY_AVAILABLE:
-        try:
-            c_ = np.polyfit(xs, amounts, 1)
-            slope, intercept = float(c_[0]), float(c_[1])
-        except Exception:
-            slope, intercept = linear_fit(xs, amounts)
-    else:
-        slope, intercept = linear_fit(xs, amounts)
-    y_last, m_last = months[-1].split("-")
-    base_date = date(int(y_last), int(m_last), 1)
-    labels = [add_months(base_date, i).strftime("%Y-%m") for i in range(1, months_ahead+1)]
-    preds  = [max(intercept + slope*(xs[-1]+i), 0.0) for i in range(1, months_ahead+1)]
-    return labels, preds
-
-# ── email notifications ───────────────────────────────────────────────────────
-def _send_email(to: str, subject: str, body: str):
-    if not EMAIL_CONFIG.get("enabled") or not to:
-        return
+# =============================================================================
+# EMAIL
+# =============================================================================
+def _send_email(to, subject, body):
+    if not EMAIL_CONFIG.get("enabled") or not to: return
     try:
-        msg = MIMEMultipart()
-        msg["From"]    = EMAIL_CONFIG["sender"]
-        msg["To"]      = to
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "html"))
+        msg = MIMEMultipart(); msg["From"]=EMAIL_CONFIG["sender"]; msg["To"]=to; msg["Subject"]=subject
+        msg.attach(MIMEText(body,"html"))
         with smtplib.SMTP(EMAIL_CONFIG["smtp_host"], EMAIL_CONFIG["smtp_port"]) as s:
-            s.starttls()
-            s.login(EMAIL_CONFIG["sender"], EMAIL_CONFIG["password"])
+            s.starttls(); s.login(EMAIL_CONFIG["sender"], EMAIL_CONFIG["password"])
             s.sendmail(EMAIL_CONFIG["sender"], to, msg.as_string())
-    except Exception as e:
-        print(f"[Email] Failed to send to {to}: {e}")
+    except Exception as e: print(f"[Email] {e}")
 
 def _notify_approval(loan):
-    email = loan["customer_email"] if "customer_email" in loan.keys() else ""
-    if not email:
-        return
-    _send_email(email,
-        "Your Vehicle Loan Has Been Approved",
-        f"""<h2>Loan Approved</h2>
-        <p>Dear {loan['customer_name']},</p>
-        <p>Your loan <b>{loan['loan_number']}</b> of &#8377;{loan['loan_amount']:,.2f}
-           has been <b>approved</b>.</p>
-        <p>Your EMI schedule has been generated. Please log in to view details.</p>""")
+    _send_email(loan.get("customer_email",""), "Your Vehicle Loan Has Been Approved",
+        f"<h2>Loan Approved</h2><p>Dear {loan['customer_name']}, your loan <b>{loan['loan_number']}</b> of Rs {loan['loan_amount']:,.2f} has been approved.</p>")
 
 def _notify_closure(loan_id):
-    c = get_cur()
-    c.execute(_adapt_sql("SELECT * FROM LoanEntry WHERE id=?"), (loan_id,))
-    loan = c.fetchone()
-    if not loan or not loan["customer_email"]:
-        return
-    _send_email(loan["customer_email"],
-        "Congratulations! Your Loan Is Fully Repaid",
-        f"""<h2>Loan Closed</h2>
-        <p>Dear {loan['customer_name']},</p>
-        <p>All EMIs for loan <b>{loan['loan_number']}</b> have been paid.
-           Your loan is now <b>closed</b>. Congratulations!</p>""")
+    c = get_cur(); c.execute(q("SELECT * FROM LoanEntry WHERE id=?"), (loan_id,)); loan = c.fetchone()
+    if loan and loan.get("customer_email"):
+        _send_email(loan["customer_email"], "Loan Fully Repaid — Congratulations!",
+            f"<h2>Loan Closed</h2><p>Dear {loan['customer_name']}, all EMIs for loan <b>{loan['loan_number']}</b> are paid. Congratulations!</p>")
 
-def send_overdue_reminders():
-    """Send reminder emails for all overdue EMIs."""
-    for emi in get_overdue_emis():
-        c = get_cur()
-        c.execute(_adapt_sql("SELECT customer_email,customer_name FROM LoanEntry WHERE id=?"), (emi["loan_id"],))
-        row = c.fetchone()
-        if row and row["customer_email"]:
-            remaining = emi["remaining_amount"] or emi["emi_amount"]
-            _send_email(row["customer_email"],
-                "EMI Payment Overdue - Action Required",
-                f"""<h2>Overdue EMI Reminder</h2>
-                <p>Dear {row['customer_name']},</p>
-                <p>EMI #{emi['installment_no']} of &#8377;{remaining:,.2f}
-                   was due on <b>{emi['due_date']}</b> and is now overdue.</p>
-                <p>Please make the payment at your earliest convenience.</p>""")
-
-# ── PDF report generation ─────────────────────────────────────────────────────
-def generate_loan_report_pdf(path: str, filters=None):
-    """Generate a full PDF report for all loans matching filters."""
-    if not REPORTLAB_AVAILABLE:
-        raise RuntimeError("reportlab is not installed. Run: pip install reportlab")
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle("title", parent=styles["Title"],
-                                 fontSize=18, spaceAfter=12)
-    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=13, spaceAfter=6)
-
+# =============================================================================
+# PDF REPORT
+# =============================================================================
+def generate_pdf():
+    if not REPORTLAB_AVAILABLE: raise RuntimeError("reportlab not installed")
+    buf = io.BytesIO(); styles = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=styles["Title"], fontSize=20, spaceAfter=12)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], fontSize=14, spaceAfter=8)
     story = []
-
-    # ── Cover page ──────────────────────────────────────────────────────────
-    story.append(Paragraph("Vehicle Loan Management", title_style))
-    story.append(Paragraph(f"Report generated: {datetime.now().strftime('%d %b %Y %H:%M')}",
-                            styles["Normal"]))
+    story.append(Paragraph("Vehicle Loan Management Report", h1))
+    story.append(Paragraph(f"Generated: {datetime.now().strftime('%d %b %Y %H:%M')}", styles["Normal"]))
     story.append(Spacer(1, 0.5*cm))
-
-    # KPI summary
-    tl, tla, tr, tp = get_kpi_totals(filters)
-    counts = get_loan_summary_counts()
-    kpi_data = [
-        ["Metric", "Value"],
-        ["Total Loans",           str(tl)],
-        ["Total Loan Amount",     f"Rs {tla:,.2f}"],
-        ["Total Received",        f"Rs {tr:,.2f}"],
-        ["Total Pending",         f"Rs {tp:,.2f}"],
-        ["Pending Approval",      str(counts["pending"])],
-        ["Active / Approved",     str(counts["approved"])],
-        ["Closed",                str(counts["closed"])],
-        ["Rejected",              str(counts["rejected"])],
-        ["Overdue EMIs",          str(counts["overdue"])],
-        ["Upcoming EMIs (10d)",   str(counts["upcoming"])],
-    ]
-    kpi_tbl = Table(kpi_data, colWidths=[8*cm, 7*cm])
-    kpi_tbl.setStyle(TableStyle([
-        ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#0057b8")),
-        ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
-        ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#e8f0fb")]),
-        ("GRID",        (0,0), (-1,-1), 0.5, colors.grey),
-        ("ALIGN",       (1,1), (-1,-1), "RIGHT"),
-    ]))
-    story.append(kpi_tbl)
-    story.append(PageBreak())
-
-    # ── All Loans table ─────────────────────────────────────────────────────
+    kpis = get_kpis()
+    kpi_data = [["Metric","Value"],["Total Loans",str(kpis["total"])],
+                ["Total Disbursed",f"Rs {kpis['disbursed']:,.2f}"],["Total Received",f"Rs {kpis['received']:,.2f}"],
+                ["Total Pending",f"Rs {kpis['pending_amt']:,.2f}"],["Pending Approval",str(kpis["pending"])],
+                ["Active",str(kpis["approved"])],["Closed",str(kpis["closed"])],
+                ["Rejected",str(kpis["rejected"])],["Overdue EMIs",str(kpis["overdue"])],["Upcoming (10d)",str(kpis["upcoming"])]]
+    t = Table(kpi_data, colWidths=[8*cm,7*cm])
+    t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#0057b8")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#e8f0fb")]),
+        ("GRID",(0,0),(-1,-1),0.5,colors.grey),("ALIGN",(1,1),(-1,-1),"RIGHT")]))
+    story.append(t); story.append(PageBreak())
     story.append(Paragraph("All Loans", h2))
-    c = get_cur()
-    fsql, fparams = "", []
-    if filters:
-        if filters.get("ltype"):
-            fsql += " AND vehicle_type=?"; fparams.append(filters["ltype"])
-        if filters.get("segment"):
-            fsql += " AND customer_name LIKE ?"; fparams.append(f"%{filters['segment']}%")
-    c.execute(_adapt_sql(f"SELECT * FROM LoanEntry WHERE 1=1 {fsql} ORDER BY created_at DESC"), fparams)
-    loans = c.fetchall()
-
-    loan_data = [["Loan #", "Customer", "Type", "Amount (Rs)", "Rate", "Tenure", "Status"]]
-    for l in loans:
-        loan_data.append([
-            l["loan_number"], l["customer_name"], l["vehicle_type"],
-            f"{l['loan_amount']:,.0f}",
-            f"{l['interest_rate']*100:.1f}%",
-            f"{l['tenure']}m",
-            l["status"],
-        ])
-
-    if len(loan_data) > 1:
-        tbl = Table(loan_data, repeatRows=1,
-                    colWidths=[2.8*cm, 4.5*cm, 2.2*cm, 3*cm, 1.8*cm, 1.8*cm, 2.8*cm])
-        tbl.setStyle(TableStyle([
-            ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#0057b8")),
-            ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
-            ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE",    (0,0), (-1,-1), 8),
-            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#e8f0fb")]),
-            ("GRID",        (0,0), (-1,-1), 0.4, colors.grey),
-            ("ALIGN",       (3,1), (3,-1), "RIGHT"),
-        ]))
-        story.append(tbl)
-    else:
-        story.append(Paragraph("No loan records found.", styles["Normal"]))
-    story.append(PageBreak())
-
-    # ── Overdue EMIs ────────────────────────────────────────────────────────
-    story.append(Paragraph("Overdue EMIs", h2))
+    c = get_cur(); c.execute("SELECT * FROM LoanEntry ORDER BY created_at DESC"); loans = c.fetchall()
+    ld = [["Loan #","Customer","Type","Amount (Rs)","Rate","Tenure","Status"]]
+    for l in loans: ld.append([l["loan_number"],l["customer_name"],l["vehicle_type"],f"{l['loan_amount']:,.0f}",f"{l['interest_rate']*100:.1f}%",f"{l['tenure']}m",l["status"]])
+    if len(ld) > 1:
+        lt = Table(ld, repeatRows=1, colWidths=[2.8*cm,4.5*cm,2.2*cm,3*cm,1.8*cm,1.8*cm,2.8*cm])
+        lt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#0057b8")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#e8f0fb")]),("GRID",(0,0),(-1,-1),0.4,colors.grey)]))
+        story.append(lt)
+    story.append(PageBreak()); story.append(Paragraph("Overdue EMIs", h2))
     overdue = get_overdue_emis()
     if overdue:
-        od_data = [["Loan #", "Customer", "Inst #", "Due Date", "Amount Due (Rs)", "Days Overdue"]]
+        od = [["Loan #","Customer","Inst #","Due Date","Amount Due (Rs)","Days Overdue"]]
         for e in overdue:
-            due_d = parse_date(e["due_date"])
-            od_data.append([
-                e["loan_number"], e["customer_name"],
-                str(e["installment_no"]), e["due_date"],
-                f"{(e['remaining_amount'] or e['emi_amount']):,.2f}",
-                str((date.today() - due_d).days),
-            ])
-        od_tbl = Table(od_data, repeatRows=1,
-                       colWidths=[2.8*cm, 4.5*cm, 1.5*cm, 2.5*cm, 3.5*cm, 3*cm])
-        od_tbl.setStyle(TableStyle([
-            ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#d7263d")),
-            ("TEXTCOLOR",   (0,0), (-1,0), colors.white),
-            ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
-            ("FONTSIZE",    (0,0), (-1,-1), 8),
-            ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#fdecea")]),
-            ("GRID",        (0,0), (-1,-1), 0.4, colors.grey),
-        ]))
-        story.append(od_tbl)
-    else:
-        story.append(Paragraph("No overdue EMIs.", styles["Normal"]))
+            try: days = (date.today() - parse_date(e["due_date"])).days
+            except Exception: days = 0
+            od.append([e["loan_number"],e["customer_name"],str(e["installment_no"]),e["due_date"],f"{(e['remaining_amount'] or e['emi_amount']):,.2f}",str(days)])
+        ot = Table(od, repeatRows=1, colWidths=[2.8*cm,4.5*cm,1.5*cm,2.5*cm,3.5*cm,3*cm])
+        ot.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#d7263d")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),("FONTSIZE",(0,0),(-1,-1),8),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#fdecea")]),("GRID",(0,0),(-1,-1),0.4,colors.grey)]))
+        story.append(ot)
+    else: story.append(Paragraph("No overdue EMIs.", styles["Normal"]))
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=1.5*cm, rightMargin=1.5*cm, topMargin=2*cm, bottomMargin=2*cm)
+    doc.build(story); buf.seek(0); return buf
 
-    doc = SimpleDocTemplate(path, pagesize=A4,
-                            leftMargin=1.5*cm, rightMargin=1.5*cm,
-                            topMargin=2*cm, bottomMargin=2*cm)
-    doc.build(story)
-    return path
+# =============================================================================
+# BASE HTML TEMPLATE
+# =============================================================================
+BASE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vehicle Loan Manager</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>
+:root{--sb:#0a2540;--sbh:#163a60;--accent:#0057b8}
+body{background:#f0f4f8;font-family:'Segoe UI',sans-serif}
+.sidebar{background:var(--sb);min-height:100vh;width:225px;position:fixed;top:0;left:0;z-index:100;padding-top:.8rem;overflow-y:auto}
+.sidebar .brand{color:#fff;font-size:1.05rem;font-weight:700;padding:.8rem 1.1rem 1.2rem;display:flex;align-items:center;gap:.5rem}
+.sidebar a{color:#a8c4e0;text-decoration:none;display:flex;align-items:center;gap:.55rem;padding:.5rem 1.1rem;font-size:.875rem;transition:.15s}
+.sidebar a:hover,.sidebar a.active{background:var(--sbh);color:#fff;border-radius:0}
+.nav-sec{color:#5a8ab0;font-size:.68rem;font-weight:600;text-transform:uppercase;padding:.7rem 1.1rem .2rem;letter-spacing:.08em}
+.main{margin-left:225px;padding:1.8rem}
+.kpi-card{border-radius:14px;padding:1.3rem;color:#fff}
+.kpi-card .val{font-size:1.7rem;font-weight:700;line-height:1.1}
+.kpi-card .lbl{font-size:.78rem;opacity:.85;margin-top:.25rem}
+.card{border:none;border-radius:12px;box-shadow:0 1px 5px rgba(0,0,0,.09)}
+.table th{background:#f8f9fa;font-size:.78rem;text-transform:uppercase;letter-spacing:.04em;color:#666}
+.badge-admin{background:#0057b8!important}.badge-manager{background:#00844c!important}.badge-viewer{background:#888!important}
+@media(max-width:768px){.sidebar{position:relative;width:100%;min-height:auto}.main{margin-left:0}}
+</style></head>
+<body><div class="d-flex">
+<div class="sidebar">
+  <div class="brand"><i class="bi bi-car-front-fill" style="font-size:1.2rem;color:#60a5fa"></i> LoanManager</div>
+  {% if session.username %}
+  <div class="px-3 mb-1" style="color:#6fa3c8;font-size:.8rem">
+    <i class="bi bi-person-circle"></i> {{session.username}}
+    <span class="badge ms-1 badge-{{session.role}} text-white" style="font-size:.65rem">{{session.role}}</span>
+  </div>
+  <div class="nav-sec">Main</div>
+  <a href="/dashboard" class="{{'active' if active=='dashboard'}}"><i class="bi bi-speedometer2"></i>Dashboard</a>
+  <a href="/loans" class="{{'active' if active=='loans'}}"><i class="bi bi-file-earmark-text"></i>All Loans</a>
+  <a href="/customers" class="{{'active' if active=='customers'}}"><i class="bi bi-people"></i>Customers</a>
+  {% if can_do('can_add') %}
+  <div class="nav-sec">Manage</div>
+  <a href="/loan/add" class="{{'active' if active=='add'}}"><i class="bi bi-plus-circle"></i>New Loan</a>
+  {% endif %}
+  {% if can_do('can_approve') %}
+  <a href="/approval" class="{{'active' if active=='approval'}}"><i class="bi bi-check2-circle"></i>Approvals</a>
+  {% endif %}
+  <a href="/emis" class="{{'active' if active=='emis'}}"><i class="bi bi-calendar3"></i>EMI Schedule</a>
+  <div class="nav-sec">Reports</div>
+  <a href="/alerts" class="{{'active' if active=='alerts'}}"><i class="bi bi-bell"></i>Alerts</a>
+  <a href="/closed" class="{{'active' if active=='closed'}}"><i class="bi bi-archive"></i>Closed Loans</a>
+  <a href="/rejected" class="{{'active' if active=='rejected'}}"><i class="bi bi-x-circle"></i>Rejected</a>
+  <a href="/calculator" class="{{'active' if active=='calculator'}}"><i class="bi bi-calculator"></i>Calculator</a>
+  {% if can_do('can_report') %}
+  <a href="/report"><i class="bi bi-file-pdf"></i>PDF Report</a>
+  <a href="/export/loans"><i class="bi bi-download"></i>Export CSV</a>
+  {% endif %}
+  {% if can_do('can_users') %}
+  <div class="nav-sec">Admin</div>
+  <a href="/users" class="{{'active' if active=='users'}}"><i class="bi bi-shield-lock"></i>User Mgmt</a>
+  {% endif %}
+  <div style="padding:.8rem 0">
+  <a href="/logout" style="color:#f87171"><i class="bi bi-box-arrow-left"></i>Logout</a>
+  </div>
+  {% endif %}
+</div>
+<div class="main flex-grow-1">
+  {% with msgs=get_flashed_messages(with_categories=true) %}{% for cat,msg in msgs %}
+  <div class="alert alert-{{'success' if cat=='success' else 'danger'}} alert-dismissible fade show">
+    {{msg}}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>
+  {% endfor %}{% endwith %}
+  {% block content %}{% endblock %}
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>"""
 
-# ═════════════════════════════════════════════════════════════════════════════
-#  FLASK WEB APP
-# ═════════════════════════════════════════════════════════════════════════════
-def create_flask_app():
-    try:
-        from flask import (Flask, render_template_string, request, redirect,
-                           url_for, session, flash, send_file, jsonify)
-    except ImportError:
-        print("Flask not installed. Run: pip install flask"); return None
+def render(tpl, **kw):
+    kw.setdefault("active",""); kw["can_do"]=can_do
+    return render_template_string(BASE.replace("{% block content %}{% endblock %}", tpl), **kw)
 
+# =============================================================================
+# AUTH DECORATORS
+# =============================================================================
+def login_required(f):
+    @wraps(f)
+    def dec(*a,**k):
+        if "username" not in session: return redirect("/login")
+        return f(*a,**k)
+    return dec
+
+def role_required(*roles):
+    def decorator(f):
+        @wraps(f)
+        def dec(*a,**k):
+            if session.get("role") not in roles:
+                flash("Access denied.", "danger"); return redirect("/dashboard")
+            return f(*a,**k)
+        return dec
+    return decorator
+
+# =============================================================================
+# FLASK APP FACTORY
+# =============================================================================
+def create_app():
     app = Flask(__name__)
     app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 
-    # ── Jinja base template ──────────────────────────────────────────────────
-    BASE = """
-    <!doctype html>
-    <html lang="en">
-    <head>
-      <meta charset="utf-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>Vehicle Loan Manager</title>
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-      <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css" rel="stylesheet">
-      <style>
-        body { background:#f0f4f8; font-family:'Segoe UI',sans-serif; }
-        .sidebar { min-height:100vh; background:#0057b8; color:#fff; padding-top:20px; }
-        .sidebar a { color:#cfe2ff; text-decoration:none; display:block; padding:10px 20px; }
-        .sidebar a:hover,.sidebar a.active { background:#004494; color:#fff; }
-        .kpi-card { border-radius:12px; padding:20px; color:#fff; }
-        .search-bar { max-width:320px; }
-        .badge-admin{background:#0057b8} .badge-manager{background:#00844c} .badge-viewer{background:#888}
-      </style>
-    </head>
-    <body>
-    <div class="d-flex">
-      <div class="sidebar col-2">
-        <div class="text-center fw-bold fs-5 mb-4 px-2">🚗 LoanManager</div>
-        {% if session.username %}
-          <div class="px-3 mb-2 small text-light">
-            👤 {{ session.username }}
-            <span class="badge badge-{{ session.role }} text-white ms-1">{{ session.role }}</span>
-          </div>
-          <a href="/dashboard" class="{{ 'active' if active=='dashboard' }}"><i class="bi bi-speedometer2 me-2"></i>Dashboard</a>
-          {% if session.role in ['admin','manager','viewer'] %}
-          <a href="/loans" class="{{ 'active' if active=='loans' }}"><i class="bi bi-file-earmark-text me-2"></i>All Loans</a>
-          {% endif %}
-          {% if session.role in ['admin','manager'] %}
-          <a href="/loan/add" class="{{ 'active' if active=='add' }}"><i class="bi bi-plus-circle me-2"></i>New Loan</a>
-          <a href="/approval" class="{{ 'active' if active=='approval' }}"><i class="bi bi-check2-circle me-2"></i>Approvals</a>
-          {% endif %}
-          <a href="/customers" class="{{ 'active' if active=='customers' }}"><i class="bi bi-people me-2"></i>Customers</a>
-          <a href="/emis" class="{{ 'active' if active=='emis' }}"><i class="bi bi-calendar3 me-2"></i>EMI Schedule</a>
-          <a href="/alerts" class="{{ 'active' if active=='alerts' }}"><i class="bi bi-bell me-2"></i>Alerts</a>
-          <a href="/closed" class="{{ 'active' if active=='closed' }}"><i class="bi bi-archive me-2"></i>Closed</a>
-          <a href="/rejected" class="{{ 'active' if active=='rejected' }}"><i class="bi bi-x-circle me-2"></i>Rejected</a>
-          <a href="/report" class="{{ 'active' if active=='report' }}"><i class="bi bi-file-pdf me-2"></i>PDF Report</a>
-          {% if session.role == 'admin' %}
-          <a href="/users" class="{{ 'active' if active=='users' }}"><i class="bi bi-shield-lock me-2"></i>User Mgmt</a>
-          {% endif %}
-          <a href="/logout" class="mt-4 text-warning"><i class="bi bi-box-arrow-left me-2"></i>Logout</a>
-        {% endif %}
-      </div>
-      <div class="col-10 p-4">
-        {% with msgs = get_flashed_messages(with_categories=true) %}
-          {% for cat,msg in msgs %}
-          <div class="alert alert-{{ 'success' if cat=='success' else 'danger' }} alert-dismissible fade show">
-            {{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-          </div>
-          {% endfor %}
-        {% endwith %}
-        {% block content %}{% endblock %}
-      </div>
-    </div>
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    </body></html>
-    """
-
-    def login_required(f):
-        from functools import wraps
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            if "username" not in session:
-                return redirect("/login")
-            return f(*args, **kwargs)
-        return decorated
-
-    def role_required(*roles):
-        from functools import wraps
-        def decorator(f):
-            @wraps(f)
-            def decorated(*args, **kwargs):
-                if session.get("role") not in roles:
-                    flash("Access denied for your role.", "danger")
-                    return redirect("/dashboard")
-                return f(*args, **kwargs)
-            return decorated
-        return decorator
-
-    # ── Login ─────────────────────────────────────────────────────────────
-    LOGIN_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <div class="row justify-content-center mt-5">
-      <div class="col-md-4">
-        <div class="card shadow">
-          <div class="card-body p-4">
-            <h4 class="mb-3 text-center">🔐 Sign In</h4>
-            <form method="post">
-              <div class="mb-3"><label>Username</label>
-                <input name="username" class="form-control" required></div>
-              <div class="mb-3"><label>Password</label>
-                <input name="password" type="password" class="form-control" required></div>
-              <button class="btn btn-primary w-100">Login</button>
-            </form>
-            <hr><small class="text-muted">Default: admin/admin123 · manager/manager123 · viewer/viewer123</small>
-          </div>
-        </div>
-      </div>
-    </div>
-    {% endblock %}""")
+    with app.app_context():
+        init_db()
 
     @app.route("/login", methods=["GET","POST"])
     def login():
         if request.method == "POST":
             user = authenticate_user(request.form["username"], request.form["password"])
             if user:
-                session["username"] = user["username"]
-                session["role"]     = user["role"]
+                session["username"] = user["username"]; session["role"] = user["role"]
                 flash(f"Welcome, {user['username']}!", "success")
                 return redirect("/dashboard")
             flash("Invalid credentials.", "danger")
-        return render_template_string(LOGIN_TPL, active="")
+        return render_template_string("""<!doctype html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<style>body{background:#0a2540;min-height:100vh;display:flex;align-items:center;justify-content:center}
+.box{background:#fff;border-radius:16px;padding:2.5rem;width:100%;max-width:400px;box-shadow:0 8px 40px rgba(0,0,0,.35)}
+.brand{color:#0057b8;font-size:1.4rem;font-weight:700;text-align:center;margin-bottom:1.5rem}</style></head>
+<body><div class="box">
+<div class="brand"><i class="bi bi-car-front-fill"></i> LoanManager</div>
+{% with msgs=get_flashed_messages(with_categories=true) %}{% for cat,msg in msgs %}
+<div class="alert alert-{{'success' if cat=='success' else 'danger'}}">{{msg}}</div>
+{% endfor %}{% endwith %}
+<form method="post">
+<div class="mb-3"><label class="form-label fw-semibold">Username</label>
+<input name="username" class="form-control form-control-lg" autofocus required></div>
+<div class="mb-4"><label class="form-label fw-semibold">Password</label>
+<input name="password" type="password" class="form-control form-control-lg" required></div>
+<button class="btn btn-primary w-100 btn-lg">Sign In</button>
+</form>
+<hr><p class="text-muted text-center" style="font-size:.8rem">admin/admin123 | manager/manager123 | viewer/viewer123</p>
+</div></body></html>""")
 
     @app.route("/logout")
-    def logout():
-        session.clear(); return redirect("/login")
+    def logout(): session.clear(); return redirect("/login")
 
     @app.route("/")
     def index(): return redirect("/dashboard")
 
-    # ── Dashboard ─────────────────────────────────────────────────────────
-    DASH_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">📊 Dashboard</h3>
-    <div class="row g-3 mb-4">
-      <div class="col"><div class="kpi-card" style="background:#0057b8">
-        <div class="fs-4 fw-bold">{{ counts.total }}</div><div>Total Loans</div></div></div>
-      <div class="col"><div class="kpi-card" style="background:#00844c">
-        <div class="fs-4 fw-bold">Rs {{ "%.0f"|format(kpi[1]) }}</div><div>Total Disbursed</div></div></div>
-      <div class="col"><div class="kpi-card" style="background:#1a7a4a">
-        <div class="fs-4 fw-bold">Rs {{ "%.0f"|format(kpi[2]) }}</div><div>Amount Received</div></div></div>
-      <div class="col"><div class="kpi-card" style="background:#d7263d">
-        <div class="fs-4 fw-bold">Rs {{ "%.0f"|format(kpi[3]) }}</div><div>Amount Pending</div></div></div>
-      <div class="col"><div class="kpi-card" style="background:#e67e22">
-        <div class="fs-4 fw-bold">{{ counts.overdue }}</div><div>Overdue EMIs</div></div></div>
-      <div class="col"><div class="kpi-card" style="background:#6c757d">
-        <div class="fs-4 fw-bold">{{ counts.upcoming }}</div><div>Upcoming (10d)</div></div></div>
-    </div>
-    <div class="row">
-      <div class="col-md-6">
-        <div class="card mb-3"><div class="card-header fw-bold text-danger">⚠ Overdue EMIs</div>
-        <div class="card-body p-0"><table class="table table-sm mb-0">
-          <thead><tr><th>Loan #</th><th>Customer</th><th>Due</th><th>Amount</th><th>Days</th></tr></thead>
-          <tbody>
-          {% for e in overdue %}
-          <tr class="table-danger"><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td>
-          <td>{{e.due_date}}</td>
-          <td>Rs {{(e.remaining_amount or e.emi_amount)|round(2)}}</td>
-          <td>{{(today-e.due_date[:10])|int}} <span class="badge bg-danger">days</span></td></tr>
-          {% else %}<tr><td colspan=5 class="text-center text-muted">None</td></tr>
-          {% endfor %}
-          </tbody></table></div></div>
-      </div>
-      <div class="col-md-6">
-        <div class="card"><div class="card-header fw-bold text-warning">🔔 Upcoming EMIs</div>
-        <div class="card-body p-0"><table class="table table-sm mb-0">
-          <thead><tr><th>Loan #</th><th>Customer</th><th>Due</th><th>Amount</th><th>In</th></tr></thead>
-          <tbody>
-          {% for e in upcoming %}
-          <tr class="table-warning"><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td>
-          <td>{{e.due_date}}</td>
-          <td>Rs {{(e.remaining_amount or e.emi_amount)|round(2)}}</td>
-          <td>{{(e.due_date[:10]-today)|int}} days</td></tr>
-          {% else %}<tr><td colspan=5 class="text-center text-muted">None</td></tr>
-          {% endfor %}
-          </tbody></table></div></div>
-      </div>
-    </div>
-    {% endblock %}""")
-
     @app.route("/dashboard")
     @login_required
     def dashboard():
-        counts  = get_loan_summary_counts()
-        kpi     = get_kpi_totals()
-        overdue  = get_overdue_emis()
-        upcoming = get_upcoming_emis()
-        today   = date.today().isoformat()
-        return render_template_string(DASH_TPL, active="dashboard",
-            counts=counts, kpi=kpi, overdue=overdue,
-            upcoming=upcoming, today=today)
-
-    # ── Loans list ─────────────────────────────────────────────────────────
-    LOANS_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <div class="d-flex justify-content-between align-items-center mb-3">
-      <h3>📄 All Loans</h3>
-      {% if session.role in ['admin','manager'] %}
-      <a href="/loan/add" class="btn btn-primary btn-sm"><i class="bi bi-plus"></i> New Loan</a>
-      {% endif %}
-    </div>
-    <form class="d-flex mb-3 gap-2" method="get">
-      <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search by name, loan #, type...">
-      <button class="btn btn-outline-primary">Search</button>
-      <a href="/loans" class="btn btn-outline-secondary">Clear</a>
-    </form>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover table-striped mb-0">
-      <thead class="table-dark"><tr>
-        <th>ID</th><th>Loan #</th><th>Customer</th><th>Type</th>
-        <th>Amount</th><th>Rate</th><th>Tenure</th><th>Start</th>
-        <th>Status</th><th>Actions</th>
-      </tr></thead>
-      <tbody>
-      {% for l in loans %}
-      <tr>
-        <td>{{l.id}}</td><td>{{l.loan_number}}</td><td>{{l.customer_name}}</td>
-        <td>{{l.vehicle_type}}</td><td>Rs {{l.loan_amount|round(0)|int}}</td>
-        <td>{{(l.interest_rate*100)|round(2)}}%</td><td>{{l.tenure}}m</td>
-        <td>{{l.start_date}}</td>
-        <td><span class="badge bg-{{ 'success' if l.status=='Approved' else
-                                      'danger' if l.status=='Rejected' else
-                                      'secondary' if l.status=='Closed' else
-                                      'warning text-dark' }}">{{l.status}}</span></td>
-        <td><a href="/emis/{{l.id}}" class="btn btn-sm btn-outline-primary">EMIs</a></td>
-      </tr>
-      {% else %}<tr><td colspan=10 class="text-center text-muted">No loans found.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+        flag_overdues(); kpis=get_kpis(); od=get_overdue_emis()[:5]; up=get_upcoming_emis()[:5]; today=date.today()
+        return render("""
+<div class="d-flex justify-content-between align-items-center mb-4">
+<h4 class="mb-0 fw-bold">Dashboard</h4>
+<span class="text-muted small"><i class="bi bi-calendar3"></i> {{today}}</span></div>
+<div class="row g-3 mb-4">
+<div class="col-6 col-md-3"><div class="kpi-card" style="background:#0057b8"><div class="val">{{kpis.total}}</div><div class="lbl">Total Loans</div></div></div>
+<div class="col-6 col-md-3"><div class="kpi-card" style="background:#00844c"><div class="val">Rs {{'%,.0f'|format(kpis.disbursed)}}</div><div class="lbl">Disbursed</div></div></div>
+<div class="col-6 col-md-3"><div class="kpi-card" style="background:#0d6efd"><div class="val">Rs {{'%,.0f'|format(kpis.received)}}</div><div class="lbl">Collected</div></div></div>
+<div class="col-6 col-md-3"><div class="kpi-card" style="background:#d7263d"><div class="val">Rs {{'%,.0f'|format(kpis.pending_amt)}}</div><div class="lbl">Pending</div></div></div>
+</div>
+<div class="row g-3 mb-4">
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-warning">{{kpis.pending}}</div><div class="text-muted small">Awaiting</div></div></div>
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-success">{{kpis.approved}}</div><div class="text-muted small">Active</div></div></div>
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-secondary">{{kpis.closed}}</div><div class="text-muted small">Closed</div></div></div>
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-danger">{{kpis.rejected}}</div><div class="text-muted small">Rejected</div></div></div>
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-danger">{{kpis.overdue}}</div><div class="text-muted small">Overdue</div></div></div>
+<div class="col-4 col-md-2"><div class="card text-center p-3"><div class="fw-bold fs-4 text-warning">{{kpis.upcoming}}</div><div class="text-muted small">Due 10d</div></div></div>
+</div>
+<div class="row g-3">
+<div class="col-md-6"><div class="card"><div class="card-header bg-danger text-white"><i class="bi bi-exclamation-triangle"></i> Overdue EMIs</div>
+<div class="card-body p-0"><table class="table table-sm mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Due</th><th>Amount</th></tr></thead><tbody>
+{% for e in od %}<tr class="table-danger"><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td><td>{{e.due_date}}</td><td>Rs {{'%,.0f'|format(e.remaining_amount or e.emi_amount)}}</td></tr>
+{% else %}<tr><td colspan=4 class="text-center text-success py-2">No overdue EMIs</td></tr>{% endfor %}
+</tbody></table></div></div></div>
+<div class="col-md-6"><div class="card"><div class="card-header bg-warning text-dark"><i class="bi bi-clock"></i> Upcoming (10 days)</div>
+<div class="card-body p-0"><table class="table table-sm mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Due</th><th>Amount</th></tr></thead><tbody>
+{% for e in up %}<tr class="table-warning"><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td><td>{{e.due_date}}</td><td>Rs {{'%,.0f'|format(e.remaining_amount or e.emi_amount)}}</td></tr>
+{% else %}<tr><td colspan=4 class="text-center text-muted py-2">No upcoming EMIs</td></tr>{% endfor %}
+</tbody></table></div></div></div></div>""",
+        active="dashboard", kpis=kpis, od=od, up=up, today=today.isoformat())
 
     @app.route("/loans")
     @login_required
     def loans():
-        q = request.args.get("q","")
-        c = get_cur()
-        qp = f"%{q}%"
-        c.execute(_adapt_sql("""SELECT * FROM LoanEntry WHERE loan_number LIKE ? OR
-                     customer_name LIKE ? OR vehicle_type LIKE ? OR status LIKE ?
-                     ORDER BY created_at DESC"""), (qp,qp,qp,qp))
-        return render_template_string(LOANS_TPL, active="loans",
-                                      loans=c.fetchall(), q=q)
-
-    # ── Add loan ─────────────────────────────────────────────────────────
-    ADD_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">➕ New Loan Entry</h3>
-    <div class="card col-md-8"><div class="card-body">
-    <form method="post">
-      <div class="row g-3">
-        <div class="col-md-6"><label>Loan Number</label>
-          <input name="loan_number" class="form-control" required></div>
-        <div class="col-md-6"><label>Customer Name</label>
-          <input name="customer_name" class="form-control" required></div>
-        <div class="col-md-6"><label>Customer Email</label>
-          <input name="customer_email" type="email" class="form-control"></div>
-        <div class="col-md-6"><label>Vehicle Type</label>
-          <select name="vehicle_type" class="form-select">
-            <option>Car</option><option>Bike</option>
-            <option>Truck</option><option>Other</option>
-          </select></div>
-        <div class="col-md-4"><label>Loan Amount (Rs)</label>
-          <input name="loan_amount" type="number" step="0.01" class="form-control" required></div>
-        <div class="col-md-4"><label>Interest Rate (annual %)</label>
-          <input name="interest_rate" type="number" step="0.01" class="form-control" required></div>
-        <div class="col-md-4"><label>Tenure (months)</label>
-          <input name="tenure" type="number" class="form-control" required></div>
-        <div class="col-md-6"><label>Start Date</label>
-          <input name="start_date" type="date" class="form-control"
-                 value="{{ today }}" required></div>
-      </div>
-      <button class="btn btn-primary mt-4">Submit Loan</button>
-      <a href="/loans" class="btn btn-secondary mt-4 ms-2">Cancel</a>
-    </form></div></div>
-    {% endblock %}""")
+        q_=request.args.get("q",""); status=request.args.get("status",""); rows=get_loans(q_, status or None)
+        return render("""
+<div class="d-flex justify-content-between align-items-center mb-3">
+<h4 class="mb-0 fw-bold">All Loans</h4>
+{% if can_do('can_add') %}<a href="/loan/add" class="btn btn-primary btn-sm"><i class="bi bi-plus"></i> New Loan</a>{% endif %}</div>
+<div class="card mb-3"><div class="card-body py-2">
+<form class="d-flex gap-2 flex-wrap" method="get">
+<input name="q" value="{{q_}}" class="form-control form-control-sm" style="max-width:260px" placeholder="Search...">
+<select name="status" class="form-select form-select-sm" style="width:170px">
+<option value="">All statuses</option><option {{'selected' if status=='PendingApproval'}}>PendingApproval</option>
+<option {{'selected' if status=='Approved'}}>Approved</option><option {{'selected' if status=='Closed'}}>Closed</option>
+<option {{'selected' if status=='Rejected'}}>Rejected</option></select>
+<button class="btn btn-outline-primary btn-sm">Search</button>
+<a href="/loans" class="btn btn-outline-secondary btn-sm">Clear</a>
+</form></div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Type</th><th>Amount</th><th>Rate</th><th>Tenure</th><th>Start</th><th>Status</th><th></th></tr></thead>
+<tbody>{% for l in rows %}<tr>
+<td class="fw-semibold">{{l.loan_number}}</td><td>{{l.customer_name}}</td><td>{{l.vehicle_type}}</td>
+<td>Rs {{'%,.0f'|format(l.loan_amount)}}</td><td>{{'%.1f'|format(l.interest_rate*100)}}%</td>
+<td>{{l.tenure}}m</td><td>{{l.start_date}}</td>
+<td><span class="badge {{'bg-success' if l.status=='Approved' else 'bg-danger' if l.status=='Rejected' else 'bg-secondary' if l.status=='Closed' else 'bg-warning text-dark'}}">{{l.status}}</span></td>
+<td><a href="/emis/{{l.id}}" class="btn btn-sm btn-outline-primary">EMIs</a></td>
+</tr>{% else %}<tr><td colspan=9 class="text-center text-muted py-3">No loans found.</td></tr>{% endfor %}
+</tbody></table></div></div>""", active="loans", rows=rows, q_=q_, status=status)
 
     @app.route("/loan/add", methods=["GET","POST"])
     @login_required
@@ -1153,1248 +636,305 @@ def create_flask_app():
         if request.method == "POST":
             f = request.form
             try:
-                create_loan_entry(f["loan_number"], f["customer_name"],
-                                  f["vehicle_type"], f["loan_amount"],
-                                  f["interest_rate"], f["tenure"],
-                                  f["start_date"],
-                                  customer_email=f.get("customer_email",""))
-                flash("Loan submitted for approval.", "success")
-                return redirect("/loans")
-            except Exception as e:
-                flash(str(e), "danger")
-        return render_template_string(ADD_TPL, active="add",
-                                      today=date.today().isoformat())
-
-    # ── Approval ──────────────────────────────────────────────────────────
-    APPROVAL_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">✅ Loan Approvals</h3>
-    <form class="d-flex mb-3 gap-2" method="get">
-      <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search...">
-      <button class="btn btn-outline-primary">Search</button>
-    </form>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover mb-0">
-      <thead class="table-dark"><tr>
-        <th>ID</th><th>Loan #</th><th>Customer</th><th>Type</th>
-        <th>Amount</th><th>Rate</th><th>Tenure</th><th>Actions</th>
-      </tr></thead>
-      <tbody>
-      {% for l in loans %}
-      <tr>
-        <td>{{l.id}}</td><td>{{l.loan_number}}</td><td>{{l.customer_name}}</td>
-        <td>{{l.vehicle_type}}</td><td>Rs {{l.loan_amount|round(0)|int}}</td>
-        <td>{{(l.interest_rate*100)|round(2)}}%</td><td>{{l.tenure}}m</td>
-        <td>
-          <form method="post" style="display:inline">
-            <input type="hidden" name="loan_id" value="{{l.id}}">
-            <input type="hidden" name="action" value="approve">
-            <button class="btn btn-success btn-sm">Approve</button>
-          </form>
-          <form method="post" style="display:inline" class="ms-1">
-            <input type="hidden" name="loan_id" value="{{l.id}}">
-            <input type="hidden" name="action" value="reject">
-            <input name="reason" class="form-control d-inline" style="width:140px"
-                   placeholder="Reason" required>
-            <button class="btn btn-danger btn-sm">Reject</button>
-          </form>
-        </td>
-      </tr>
-      {% else %}<tr><td colspan=8 class="text-center text-muted">No pending loans.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+                create_loan(f["loan_number"],f["customer_name"],f["vehicle_type"],f["loan_amount"],f["interest_rate"],f["tenure"],f["start_date"],f.get("customer_email",""))
+                flash("Loan submitted for approval.", "success"); return redirect("/loans")
+            except Exception as e: flash(str(e), "danger")
+        return render("""
+<h4 class="fw-bold mb-4">New Loan Entry</h4>
+<div class="card col-lg-8"><div class="card-body"><form method="post"><div class="row g-3">
+<div class="col-md-6"><label class="form-label">Loan Number *</label><input name="loan_number" class="form-control" required></div>
+<div class="col-md-6"><label class="form-label">Customer Name *</label><input name="customer_name" class="form-control" required></div>
+<div class="col-md-6"><label class="form-label">Customer Email</label><input name="customer_email" type="email" class="form-control"></div>
+<div class="col-md-6"><label class="form-label">Vehicle Type *</label>
+<select name="vehicle_type" class="form-select"><option>Car</option><option>Bike</option><option>Truck</option><option>Other</option></select></div>
+<div class="col-md-4"><label class="form-label">Loan Amount (Rs) *</label><input name="loan_amount" type="number" step="0.01" class="form-control" required></div>
+<div class="col-md-4"><label class="form-label">Interest Rate (% p.a.) *</label><input name="interest_rate" type="number" step="0.01" class="form-control" required placeholder="e.g. 12"></div>
+<div class="col-md-4"><label class="form-label">Tenure (months) *</label><input name="tenure" type="number" class="form-control" required></div>
+<div class="col-md-6"><label class="form-label">Start Date *</label><input name="start_date" type="date" class="form-control" value="{{today}}" required></div>
+</div><div class="mt-4 d-flex gap-2"><button class="btn btn-primary">Submit Loan</button>
+<a href="/loans" class="btn btn-outline-secondary">Cancel</a></div>
+</form></div></div>""", active="add", today=date.today().isoformat())
 
     @app.route("/approval", methods=["GET","POST"])
     @login_required
     @role_required("admin","manager")
     def approval():
         if request.method == "POST":
-            lid    = int(request.form["loan_id"])
-            action = request.form["action"]
+            lid=int(request.form["loan_id"]); action=request.form["action"]
             try:
-                if action == "approve":
-                    approve_loan(lid); flash("Loan approved!", "success")
-                else:
-                    reject_loan(lid, request.form.get("reason","No reason given"))
-                    flash("Loan rejected.", "success")
-            except Exception as e:
-                flash(str(e), "danger")
-        q = request.args.get("q","")
-        return render_template_string(APPROVAL_TPL, active="approval",
-                                      loans=list_pending_loans(q), q=q)
-
-    # ── Customers ─────────────────────────────────────────────────────────
-    CUST_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">👥 Customers</h3>
-    <form class="d-flex mb-3 gap-2" method="get">
-      <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search name, type, status...">
-      <button class="btn btn-outline-primary">Search</button>
-    </form>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover table-striped mb-0">
-      <thead class="table-dark"><tr>
-        <th>ID</th><th>Loan ID</th><th>Name</th><th>Type</th>
-        <th>Loan Amount</th><th>EMI</th><th>Status</th><th>Actions</th>
-      </tr></thead>
-      <tbody>
-      {% for c in customers %}
-      <tr>
-        <td>{{c.customer_id}}</td><td>{{c.loan_id}}</td><td>{{c.name}}</td>
-        <td>{{c.vehicle_type}}</td><td>Rs {{c.loan_amount|round(0)|int}}</td>
-        <td>Rs {{c.emi_amount|round(2)}}</td>
-        <td><span class="badge bg-{{ 'success' if c.status=='Active' else 'secondary' }}">
-          {{c.status}}</span></td>
-        <td><a href="/emis/{{c.loan_id}}" class="btn btn-sm btn-outline-primary">View EMIs</a></td>
-      </tr>
-      {% else %}<tr><td colspan=8 class="text-center text-muted">No customers found.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+                if action=="approve": approve_loan(lid); flash("Loan approved and EMI schedule created!","success")
+                else: reject_loan(lid, request.form.get("reason","No reason")); flash("Loan rejected.","success")
+            except Exception as e: flash(str(e),"danger")
+        q_=request.args.get("q",""); rows=get_loans(q_,"PendingApproval")
+        return render("""
+<h4 class="fw-bold mb-4">Loan Approvals</h4>
+<div class="card mb-3"><div class="card-body py-2">
+<form class="d-flex gap-2" method="get"><input name="q" value="{{q_}}" class="form-control form-control-sm" style="max-width:260px" placeholder="Search...">
+<button class="btn btn-outline-primary btn-sm">Search</button></form></div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Type</th><th>Amount</th><th>Rate</th><th>Tenure</th><th>Start</th><th>Actions</th></tr></thead>
+<tbody>{% for l in rows %}<tr>
+<td class="fw-semibold">{{l.loan_number}}</td><td>{{l.customer_name}}</td><td>{{l.vehicle_type}}</td>
+<td>Rs {{'%,.0f'|format(l.loan_amount)}}</td><td>{{'%.1f'|format(l.interest_rate*100)}}%</td><td>{{l.tenure}}m</td><td>{{l.start_date}}</td>
+<td>
+<form method="post" class="d-inline"><input type="hidden" name="loan_id" value="{{l.id}}"><input type="hidden" name="action" value="approve">
+<button class="btn btn-success btn-sm">Approve</button></form>
+<form method="post" class="d-inline ms-1" onsubmit="return prompt_reason(this)">
+<input type="hidden" name="loan_id" value="{{l.id}}"><input type="hidden" name="action" value="reject"><input type="hidden" name="reason">
+<button type="submit" class="btn btn-danger btn-sm">Reject</button></form>
+</td></tr>
+{% else %}<tr><td colspan=8 class="text-center text-muted py-3">No pending loans.</td></tr>{% endfor %}
+</tbody></table></div></div>
+<script>function prompt_reason(f){var r=prompt('Rejection reason:');if(!r)return false;f.querySelector('[name=reason]').value=r;return true;}</script>""",
+        active="approval", rows=rows, q_=q_)
 
     @app.route("/customers")
     @login_required
     def customers():
-        q = request.args.get("q","")
-        return render_template_string(CUST_TPL, active="customers",
-                                      customers=list_customers(q), q=q)
-
-    # ── EMI schedule ──────────────────────────────────────────────────────
-    EMI_LIST_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">📅 EMI Schedule — Loan {{ loan_id }}</h3>
-    <a href="/customers" class="btn btn-outline-secondary btn-sm mb-3">← Back</a>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover table-striped mb-0">
-      <thead class="table-dark"><tr>
-        <th>#</th><th>Due Date</th><th>EMI Amount</th><th>Paid</th>
-        <th>Remaining</th><th>Status</th><th>Paid At</th>
-        {% if session.role in ['admin','manager'] %}<th>Action</th>{% endif %}
-      </tr></thead>
-      <tbody>
-      {% for e in emis %}
-      <tr class="{{ 'table-success' if e.status=='Paid' else
-                    'table-danger'  if e.status=='Overdue' else
-                    'table-warning' if e.status=='Partial' else '' }}">
-        <td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
-        <td>Rs {{e.emi_amount|round(2)}}</td>
-        <td>Rs {{(e.amount_paid or 0)|round(2)}}</td>
-        <td>Rs {{(e.remaining_amount if e.remaining_amount is not none else e.emi_amount)|round(2)}}</td>
-        <td><span class="badge bg-{{ 'success' if e.status=='Paid' else
-                                      'danger'  if e.status=='Overdue' else
-                                      'warning text-dark' if e.status=='Partial' else
-                                      'secondary' }}">{{e.status}}</span></td>
-        <td>{{e.paid_at or '—'}}</td>
-        {% if session.role in ['admin','manager'] %}
-        <td>
-          {% if e.status != 'Paid' %}
-          <form method="post" action="/emi/pay">
-            <input type="hidden" name="emi_id" value="{{e.emi_id}}">
-            <input type="hidden" name="loan_id" value="{{loan_id}}">
-            <input name="pay_amount" type="number" step="0.01"
-                   value="{{(e.remaining_amount if e.remaining_amount is not none else e.emi_amount)|round(2)}}"
-                   class="form-control d-inline" style="width:110px">
-            <button class="btn btn-success btn-sm">Pay</button>
-          </form>
-          {% endif %}
-        </td>
-        {% endif %}
-      </tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+        q_=request.args.get("q",""); rows=get_customers(q_)
+        return render("""
+<h4 class="fw-bold mb-4">Customers</h4>
+<div class="card mb-3"><div class="card-body py-2">
+<form class="d-flex gap-2" method="get"><input name="q" value="{{q_}}" class="form-control form-control-sm" style="max-width:280px" placeholder="Search name, type, status...">
+<button class="btn btn-outline-primary btn-sm">Search</button><a href="/customers" class="btn btn-outline-secondary btn-sm">Clear</a>
+</form></div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Loan Amt</th><th>EMI/Month</th><th>Status</th><th></th></tr></thead>
+<tbody>{% for c in rows %}<tr>
+<td>{{c.customer_id}}</td><td class="fw-semibold">{{c.name}}</td><td>{{c.vehicle_type}}</td>
+<td>Rs {{'%,.0f'|format(c.loan_amount)}}</td><td>Rs {{'%,.2f'|format(c.emi_amount)}}</td>
+<td><span class="badge {{'bg-success' if c.status=='Active' else 'bg-secondary'}}">{{c.status}}</span></td>
+<td><a href="/emis/{{c.loan_id}}" class="btn btn-sm btn-outline-primary">View EMIs</a></td>
+</tr>{% else %}<tr><td colspan=7 class="text-center text-muted py-3">No customers.</td></tr>{% endfor %}
+</tbody></table></div></div>""", active="customers", rows=rows, q_=q_)
 
     @app.route("/emis")
     @login_required
-    def emis_all():
-        # redirect to customer page if no loan_id given
-        return redirect("/customers")
+    def emis_home(): return redirect("/customers")
 
-    @app.route("/emis/<int:loan_id>")
+    @app.route("/emis/<int:loan_id>", methods=["GET","POST"])
     @login_required
     def emis(loan_id):
-        return render_template_string(EMI_LIST_TPL, active="emis",
-                                      emis=get_emis_for_loan(loan_id),
-                                      loan_id=loan_id)
-
-    @app.route("/emi/pay", methods=["POST"])
-    @login_required
-    @role_required("admin","manager")
-    def emi_pay():
-        emi_id     = int(request.form["emi_id"])
-        loan_id    = int(request.form["loan_id"])
-        pay_amount = float(request.form.get("pay_amount", 0))
-        try:
-            msg = pay_emi(emi_id, pay_amount)
-            flash(msg, "success")
-        except Exception as e:
-            flash(str(e), "danger")
-        return redirect(f"/emis/{loan_id}")
-
-    # ── Alerts ────────────────────────────────────────────────────────────
-    ALERTS_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">🔔 Payment Alerts</h3>
-    <h5 class="text-danger">Overdue EMIs ({{ overdue|length }})</h5>
-    <div class="card mb-4"><div class="card-body p-0">
-    <table class="table table-hover mb-0">
-      <thead class="table-danger"><tr>
-        <th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th>
-        <th>Amount Due</th><th>Days Overdue</th>
-      </tr></thead>
-      <tbody>
-      {% for e in overdue %}
-      <tr><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td>
-          <td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
-          <td>Rs {{(e.remaining_amount or e.emi_amount)|round(2)}}</td>
-          <td><span class="badge bg-danger">{{days_overdue[e.emi_id]}} days</span></td></tr>
-      {% else %}<tr><td colspan=6 class="text-center text-success">No overdue EMIs ✓</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    <h5 class="text-warning">Upcoming EMIs — next 10 days ({{ upcoming|length }})</h5>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover mb-0">
-      <thead class="table-warning"><tr>
-        <th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th>
-        <th>Amount</th><th>Days Until Due</th>
-      </tr></thead>
-      <tbody>
-      {% for e in upcoming %}
-      <tr><td>{{e.loan_number}}</td><td>{{e.customer_name}}</td>
-          <td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
-          <td>Rs {{(e.remaining_amount or e.emi_amount)|round(2)}}</td>
-          <td><span class="badge bg-warning text-dark">{{days_upcoming[e.emi_id]}} days</span></td></tr>
-      {% else %}<tr><td colspan=6 class="text-center text-muted">None</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+        if request.method=="POST" and can_do("can_pay"):
+            try:
+                msg=pay_emi_db(int(request.form["emi_id"]),float(request.form.get("pay_amount",0)),float(request.form.get("extra_interest",0)))
+                flash(msg,"success")
+            except Exception as e: flash(str(e),"danger")
+            return redirect(f"/emis/{loan_id}")
+        rows=get_emis_for_loan(loan_id); c=get_cur()
+        c.execute(q("SELECT * FROM LoanEntry WHERE id=?"), (loan_id,)); loan=c.fetchone()
+        return render("""
+<div class="d-flex justify-content-between align-items-center mb-3">
+<div><h4 class="fw-bold mb-0">EMI Schedule</h4>
+{% if loan %}<span class="text-muted small">{{loan.loan_number}} — {{loan.customer_name}}</span>{% endif %}</div>
+<div class="d-flex gap-2">
+<a href="/export/emis/{{loan_id}}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-download"></i> Export</a>
+<a href="/customers" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-left"></i> Back</a>
+</div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>#</th><th>Due Date</th><th>EMI</th><th>Paid</th><th>Remaining</th><th>Status</th><th>Paid At</th>
+{% if can_do('can_pay') %}<th>Action</th>{% endif %}</tr></thead>
+<tbody>{% for e in rows %}
+<tr class="{{'table-success' if e.status=='Paid' else 'table-danger' if e.status=='Overdue' else 'table-warning' if e.status=='Partial' else ''}}">
+<td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
+<td>Rs {{'%,.2f'|format(e.emi_amount)}}</td><td>Rs {{'%,.2f'|format(e.amount_paid or 0)}}</td>
+<td>Rs {{'%,.2f'|format(e.remaining_amount if e.remaining_amount is not none else e.emi_amount)}}</td>
+<td><span class="badge {{'bg-success' if e.status=='Paid' else 'bg-danger' if e.status=='Overdue' else 'bg-warning text-dark' if e.status=='Partial' else 'bg-secondary'}}">{{e.status}}</span></td>
+<td style="font-size:.8rem">{{e.paid_at[:16] if e.paid_at else '—'}}</td>
+{% if can_do('can_pay') %}<td>{% if e.status!='Paid' %}
+<button class="btn btn-sm btn-success" data-bs-toggle="modal" data-bs-target="#payModal"
+  data-emiid="{{e.emi_id}}" data-rem="{{e.remaining_amount if e.remaining_amount is not none else e.emi_amount}}">Pay</button>
+{% endif %}</td>{% endif %}
+</tr>{% endfor %}
+</tbody></table></div></div>
+{% if can_do('can_pay') %}
+<div class="modal fade" id="payModal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+<div class="modal-header"><h5 class="modal-title">Record EMI Payment</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+<form method="post"><div class="modal-body">
+<input type="hidden" name="emi_id" id="m_emi">
+<div class="mb-3"><label class="form-label">Amount to Pay (Rs)</label><input name="pay_amount" id="m_amt" type="number" step="0.01" class="form-control" required></div>
+<div class="mb-3"><label class="form-label">Extra Interest (Rs)</label><input name="extra_interest" type="number" step="0.01" class="form-control" value="0"></div>
+</div><div class="modal-footer"><button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button class="btn btn-success">Confirm</button></div>
+</form></div></div></div>
+<script>document.getElementById('payModal').addEventListener('show.bs.modal',function(e){var b=e.relatedTarget;document.getElementById('m_emi').value=b.dataset.emiid;document.getElementById('m_amt').value=b.dataset.rem;});</script>
+{% endif %}""", active="emis", rows=rows, loan=loan, loan_id=loan_id)
 
     @app.route("/alerts")
     @login_required
     def alerts():
-        od = get_overdue_emis()
-        up = get_upcoming_emis()
-        today = date.today()
-        days_overdue  = {e["emi_id"]: (today - parse_date(e["due_date"])).days for e in od}
-        days_upcoming = {e["emi_id"]: (parse_date(e["due_date"]) - today).days for e in up}
-        return render_template_string(ALERTS_TPL, active="alerts",
-                                      overdue=od, upcoming=up,
-                                      days_overdue=days_overdue,
-                                      days_upcoming=days_upcoming)
-
-    # ── Closed ────────────────────────────────────────────────────────────
-    CLOSED_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">📦 Closed Loans</h3>
-    <form class="d-flex mb-3 gap-2" method="get">
-      <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search...">
-      <button class="btn btn-outline-primary">Search</button>
-    </form>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover table-striped mb-0">
-      <thead class="table-dark"><tr>
-        <th>Loan ID</th><th>Loan #</th><th>Customer</th>
-        <th>Type</th><th>Amount</th><th>Closed On</th>
-      </tr></thead>
-      <tbody>
-      {% for l in loans %}
-      <tr><td>{{l.loan_id}}</td><td>{{l.loan_number}}</td><td>{{l.customer_name}}</td>
-          <td>{{l.vehicle_type}}</td><td>Rs {{l.loan_amount|round(0)|int}}</td>
-          <td>{{l.closure_date}}</td></tr>
-      {% else %}<tr><td colspan=6 class="text-center text-muted">No closed loans.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+        flag_overdues(); od=get_overdue_emis(); up=get_upcoming_emis(); today=date.today()
+        return render("""
+<h4 class="fw-bold mb-4">Payment Alerts</h4>
+<h6 class="text-danger mb-2"><i class="bi bi-exclamation-triangle"></i> Overdue EMIs ({{od|length}})</h6>
+<div class="card mb-4"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th><th>Amount Due</th><th>Days Overdue</th><th></th></tr></thead>
+<tbody>{% for e in od %}<tr class="table-danger">
+<td>{{e.loan_number}}</td><td>{{e.customer_name}}</td><td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
+<td>Rs {{'%,.2f'|format(e.remaining_amount or e.emi_amount)}}</td>
+<td><span class="badge bg-danger">{{(today - (e.due_date[:10]|string))|string}} days</span></td>
+<td><a href="/emis/{{e.loan_id}}" class="btn btn-sm btn-outline-danger">View</a></td>
+</tr>{% else %}<tr><td colspan=7 class="text-center text-success py-3"><i class="bi bi-check-circle"></i> No overdue EMIs</td></tr>{% endfor %}
+</tbody></table></div></div>
+<h6 class="text-warning mb-2"><i class="bi bi-clock"></i> Upcoming EMIs — Next 10 Days ({{up|length}})</h6>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th><th>Amount</th><th></th></tr></thead>
+<tbody>{% for e in up %}<tr class="table-warning">
+<td>{{e.loan_number}}</td><td>{{e.customer_name}}</td><td>{{e.installment_no}}</td><td>{{e.due_date}}</td>
+<td>Rs {{'%,.2f'|format(e.remaining_amount or e.emi_amount)}}</td>
+<td><a href="/emis/{{e.loan_id}}" class="btn btn-sm btn-outline-warning">View</a></td>
+</tr>{% else %}<tr><td colspan=6 class="text-center text-muted py-3">No upcoming EMIs</td></tr>{% endfor %}
+</tbody></table></div></div>""", active="alerts", od=od, up=up, today=today)
 
     @app.route("/closed")
     @login_required
     def closed():
-        q = request.args.get("q","")
-        return render_template_string(CLOSED_TPL, active="closed",
-                                      loans=list_closed_loans(q), q=q)
-
-    # ── Rejected ──────────────────────────────────────────────────────────
-    REJ_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">❌ Rejected Loans</h3>
-    <form class="d-flex mb-3 gap-2" method="get">
-      <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search...">
-      <button class="btn btn-outline-primary">Search</button>
-    </form>
-    <div class="card"><div class="card-body p-0">
-    <table class="table table-hover table-striped mb-0">
-      <thead class="table-dark"><tr>
-        <th>Loan ID</th><th>Loan #</th><th>Customer</th>
-        <th>Reason</th><th>Rejected At</th>
-      </tr></thead>
-      <tbody>
-      {% for l in loans %}
-      <tr><td>{{l.loan_id}}</td><td>{{l.loan_number}}</td><td>{{l.customer_name}}</td>
-          <td>{{l.reason}}</td><td>{{l.created_at[:10]}}</td></tr>
-      {% else %}<tr><td colspan=5 class="text-center text-muted">No rejected loans.</td></tr>
-      {% endfor %}
-      </tbody>
-    </table></div></div>
-    {% endblock %}""")
+        q_=request.args.get("q",""); qp=f"%{q_}%"; c=get_cur()
+        c.execute(q("SELECT le.*,cl.closure_date FROM LoanEntry le JOIN ClosedLoans cl ON cl.loan_id=le.id WHERE le.loan_number LIKE ? OR le.customer_name LIKE ? ORDER BY cl.created_at DESC"),(qp,qp))
+        rows=c.fetchall()
+        return render("""
+<h4 class="fw-bold mb-4">Closed Loans</h4>
+<div class="card mb-3"><div class="card-body py-2"><form class="d-flex gap-2" method="get">
+<input name="q" value="{{q_}}" class="form-control form-control-sm" style="max-width:280px" placeholder="Search...">
+<button class="btn btn-outline-primary btn-sm">Search</button><a href="/closed" class="btn btn-outline-secondary btn-sm">Clear</a>
+</form></div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Type</th><th>Amount</th><th>Closed On</th></tr></thead>
+<tbody>{% for l in rows %}<tr><td class="fw-semibold">{{l.loan_number}}</td><td>{{l.customer_name}}</td>
+<td>{{l.vehicle_type}}</td><td>Rs {{'%,.0f'|format(l.loan_amount)}}</td>
+<td><span class="badge bg-secondary">{{l.closure_date}}</span></td></tr>
+{% else %}<tr><td colspan=5 class="text-center text-muted py-3">No closed loans.</td></tr>{% endfor %}
+</tbody></table></div></div>""", active="closed", rows=rows, q_=q_)
 
     @app.route("/rejected")
     @login_required
     def rejected():
-        q = request.args.get("q","")
-        return render_template_string(REJ_TPL, active="rejected",
-                                      loans=list_rejected_loans(q), q=q)
+        q_=request.args.get("q",""); qp=f"%{q_}%"; c=get_cur()
+        c.execute(q("SELECT le.loan_number,le.customer_name,rl.reason,rl.created_at FROM LoanEntry le JOIN RejectedLoans rl ON rl.loan_id=le.id WHERE le.loan_number LIKE ? OR le.customer_name LIKE ? ORDER BY rl.created_at DESC"),(qp,qp))
+        rows=c.fetchall()
+        return render("""
+<h4 class="fw-bold mb-4">Rejected Loans</h4>
+<div class="card mb-3"><div class="card-body py-2"><form class="d-flex gap-2" method="get">
+<input name="q" value="{{q_}}" class="form-control form-control-sm" style="max-width:280px" placeholder="Search...">
+<button class="btn btn-outline-primary btn-sm">Search</button></form></div></div>
+<div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>Loan #</th><th>Customer</th><th>Reason</th><th>Rejected At</th></tr></thead>
+<tbody>{% for l in rows %}<tr><td class="fw-semibold">{{l.loan_number}}</td><td>{{l.customer_name}}</td>
+<td>{{l.reason}}</td><td style="font-size:.8rem">{{l.created_at[:10]}}</td></tr>
+{% else %}<tr><td colspan=4 class="text-center text-muted py-3">No rejected loans.</td></tr>{% endfor %}
+</tbody></table></div></div>""", active="rejected", rows=rows, q_=q_)
 
-    # ── PDF Report ────────────────────────────────────────────────────────
-    RPT_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">📋 Generate PDF Report</h3>
-    <div class="card col-md-6"><div class="card-body">
-      <form method="post">
-        <div class="mb-3"><label>Vehicle Type Filter (optional)</label>
-          <select name="ltype" class="form-select">
-            <option value="">All</option>
-            <option>Car</option><option>Bike</option>
-            <option>Truck</option><option>Other</option>
-          </select></div>
-        <div class="mb-3"><label>Customer Name Contains (optional)</label>
-          <input name="segment" class="form-control" placeholder="e.g. Raj"></div>
-        <button class="btn btn-danger"><i class="bi bi-file-pdf me-2"></i>Download PDF Report</button>
-      </form>
-      {% if not reportlab %}<div class="alert alert-warning mt-3">
-        reportlab not installed. Run: <code>pip install reportlab</code></div>{% endif %}
-    </div></div>
-    {% endblock %}""")
-
-    @app.route("/report", methods=["GET","POST"])
+    @app.route("/calculator", methods=["GET","POST"])
     @login_required
-    def report():
-        if request.method == "POST":
-            if not REPORTLAB_AVAILABLE:
-                flash("reportlab not installed. Run: pip install reportlab", "danger")
-                return redirect("/report")
-            filters = {"ltype": request.form.get("ltype") or None,
-                       "segment": request.form.get("segment") or None}
-            path = "/tmp/loan_report.pdf"
+    def calculator():
+        result=None; schedule=[]
+        if request.method=="POST":
             try:
-                generate_loan_report_pdf(path, filters)
-                return send_file(path, as_attachment=True,
-                                 download_name="loan_report.pdf",
-                                 mimetype="application/pdf")
-            except Exception as e:
-                flash(str(e), "danger")
-        return render_template_string(RPT_TPL, active="report",
-                                      reportlab=REPORTLAB_AVAILABLE)
+                amt=float(request.form.get("loan_amount",0)); rate=float(request.form.get("interest_rate",0))/100/12
+                tenure=int(request.form.get("tenure",0)); mode=request.form.get("mode","EMI"); emi_in=float(request.form.get("emi_amount") or 0)
+                if mode=="EMI" and amt>0 and rate>0 and tenure>0:
+                    ev=amt*rate*(1+rate)**tenure/((1+rate)**tenure-1)
+                    result={"label":"Monthly EMI","value":f"Rs {ev:,.2f}","total":f"Rs {ev*tenure:,.2f}","interest":f"Rs {ev*tenure-amt:,.2f}"}
+                    bal=amt
+                    for i in range(1,tenure+1):
+                        intr=bal*rate; prin=ev-intr; bal-=prin
+                        schedule.append({"month":i,"principal":round(max(prin,0),2),"interest":round(max(intr,0),2),"emi":round(ev,2),"balance":round(max(bal,0),2)})
+                elif mode=="Affordability" and emi_in>0 and rate>0 and tenure>0:
+                    lv=emi_in*((1+rate)**tenure-1)/(rate*(1+rate)**tenure)
+                    result={"label":"Max Loan Amount","value":f"Rs {lv:,.2f}","total":"—","interest":"—"}
+                elif mode=="Tenure" and amt>0 and rate>0 and emi_in>0:
+                    n=math.log(emi_in/(emi_in-amt*rate))/math.log(1+rate)
+                    result={"label":"Loan Tenure","value":f"{int(round(n))} months","total":"—","interest":"—"}
+            except Exception as e: flash(str(e),"danger")
+        return render("""
+<h4 class="fw-bold mb-4">Loan Calculator</h4><div class="row g-4">
+<div class="col-lg-4"><div class="card"><div class="card-body"><form method="post">
+<div class="mb-3"><label class="form-label">Calculate</label>
+<select name="mode" class="form-select"><option>EMI</option><option>Affordability</option><option>Tenure</option></select></div>
+<div class="mb-3"><label class="form-label">Loan Amount (Rs)</label><input name="loan_amount" type="number" step="0.01" class="form-control" value="{{request.form.get('loan_amount','')}}"></div>
+<div class="mb-3"><label class="form-label">Annual Interest Rate (%)</label><input name="interest_rate" type="number" step="0.01" class="form-control" value="{{request.form.get('interest_rate','')}}"></div>
+<div class="mb-3"><label class="form-label">Tenure (months)</label><input name="tenure" type="number" class="form-control" value="{{request.form.get('tenure','')}}"></div>
+<div class="mb-3"><label class="form-label">EMI Amount (for Affordability/Tenure)</label><input name="emi_amount" type="number" step="0.01" class="form-control" value="{{request.form.get('emi_amount','')}}"></div>
+<button class="btn btn-primary w-100">Calculate</button></form></div></div></div>
+<div class="col-lg-8">
+{% if result %}<div class="card mb-3"><div class="card-body">
+<h5 class="text-primary fw-bold">{{result.label}}: {{result.value}}</h5>
+<div class="row mt-2">
+<div class="col"><span class="text-muted small">Total Payment</span><div class="fw-semibold">{{result.total}}</div></div>
+<div class="col"><span class="text-muted small">Total Interest</span><div class="fw-semibold text-danger">{{result.interest}}</div></div>
+</div></div></div>{% endif %}
+{% if schedule %}<div class="card"><div class="card-header fw-semibold">Amortization Schedule</div>
+<div class="card-body p-0" style="max-height:420px;overflow-y:auto"><table class="table table-sm mb-0">
+<thead><tr><th>#</th><th>Principal</th><th>Interest</th><th>EMI</th><th>Balance</th></tr></thead>
+<tbody>{% for r in schedule %}<tr><td>{{r.month}}</td><td>Rs {{'%,.2f'|format(r.principal)}}</td>
+<td>Rs {{'%,.2f'|format(r.interest)}}</td><td>Rs {{'%,.2f'|format(r.emi)}}</td>
+<td>Rs {{'%,.2f'|format(r.balance)}}</td></tr>{% endfor %}
+</tbody></table></div></div>{% endif %}
+</div></div>""", active="calculator", result=result, schedule=schedule)
 
-    # ── User Management ───────────────────────────────────────────────────
-    USERS_TPL = BASE.replace("{% block content %}{% endblock %}","""
-    {% block content %}
-    <h3 class="mb-4">🛡 User Management</h3>
-    <div class="row">
-      <div class="col-md-5">
-        <div class="card mb-4"><div class="card-header fw-bold">Add / Update User</div>
-        <div class="card-body">
-          <form method="post">
-            <div class="mb-2"><label>Username</label>
-              <input name="username" class="form-control" required></div>
-            <div class="mb-2"><label>Password</label>
-              <input name="password" type="password" class="form-control" required></div>
-            <div class="mb-2"><label>Role</label>
-              <select name="role" class="form-select">
-                <option>admin</option><option>manager</option><option>viewer</option>
-              </select></div>
-            <button class="btn btn-primary mt-2">Save User</button>
-          </form>
-        </div></div>
-      </div>
-      <div class="col-md-7">
-        <div class="card"><div class="card-body p-0">
-        <table class="table table-hover mb-0">
-          <thead class="table-dark"><tr><th>ID</th><th>Username</th><th>Role</th><th>Created</th></tr></thead>
-          <tbody>
-          {% for u in users %}
-          <tr><td>{{u.user_id}}</td><td>{{u.username}}</td>
-              <td><span class="badge badge-{{u.role}} text-white">{{u.role}}</span></td>
-              <td>{{u.created_at[:10]}}</td></tr>
-          {% endfor %}
-          </tbody>
-        </table></div></div>
-      </div>
-    </div>
-    {% endblock %}""")
+    @app.route("/report")
+    @login_required
+    @role_required("admin","manager","viewer")
+    def report():
+        if not REPORTLAB_AVAILABLE:
+            flash("reportlab not installed. Add it to requirements.txt","danger"); return redirect("/dashboard")
+        try:
+            buf=generate_pdf()
+            return send_file(buf, as_attachment=True, download_name=f"loan_report_{date.today()}.pdf", mimetype="application/pdf")
+        except Exception as e: flash(str(e),"danger"); return redirect("/dashboard")
+
+    @app.route("/export/loans")
+    @login_required
+    @role_required("admin","manager","viewer")
+    def export_loans():
+        c=get_cur(); c.execute("SELECT * FROM LoanEntry ORDER BY created_at DESC"); rows=c.fetchall()
+        si=io.StringIO(); w=csv.writer(si)
+        if rows: w.writerow(rows[0].keys()); [w.writerow(list(r.values())) for r in rows]
+        out=make_response(si.getvalue()); out.headers["Content-Disposition"]=f"attachment; filename=loans_{date.today()}.csv"; out.headers["Content-type"]="text/csv"
+        return out
+
+    @app.route("/export/emis/<int:loan_id>")
+    @login_required
+    def export_emis(loan_id):
+        rows=get_emis_for_loan(loan_id); si=io.StringIO(); w=csv.writer(si)
+        if rows: w.writerow(rows[0].keys()); [w.writerow(list(r.values())) for r in rows]
+        out=make_response(si.getvalue()); out.headers["Content-Disposition"]=f"attachment; filename=emis_loan{loan_id}.csv"; out.headers["Content-type"]="text/csv"
+        return out
 
     @app.route("/users", methods=["GET","POST"])
     @login_required
     @role_required("admin")
     def users():
-        if request.method == "POST":
-            uname = request.form["username"].strip()
-            pw    = request.form["password"]
-            role  = request.form["role"]
-            c = get_cur()
+        if request.method=="POST":
+            uname=request.form["username"].strip(); pw=request.form["password"]; role=request.form["role"]; c=get_cur()
             if USE_POSTGRES:
-                c.execute("""INSERT INTO Users (username,pw_hash,role,created_at)
-                             VALUES (%s,%s,%s,%s)
-                             ON CONFLICT(username) DO UPDATE SET pw_hash=%s,role=%s""",
-                          (uname, hash_pw(pw), role, datetime.now(timezone.utc).isoformat(),
-                           hash_pw(pw), role))
+                c.execute("INSERT INTO Users (username,pw_hash,role,created_at) VALUES (%s,%s,%s,%s) ON CONFLICT(username) DO UPDATE SET pw_hash=%s,role=%s",
+                          (uname,hash_pw(pw),role,datetime.now(timezone.utc).isoformat(),hash_pw(pw),role))
             else:
-                c.execute("""INSERT INTO Users (username,pw_hash,role,created_at)
-                             VALUES (?,?,?,?)
-                             ON CONFLICT(username) DO UPDATE SET pw_hash=?,role=?""",
-                          (uname, hash_pw(pw), role, datetime.now(timezone.utc).isoformat(),
-                           hash_pw(pw), role))
-            get_conn().commit()
-            flash(f"User '{uname}' saved.", "success")
-        c = get_cur()
-        c.execute("SELECT * FROM Users ORDER BY user_id")
-        return render_template_string(USERS_TPL, active="users", users=c.fetchall())
+                c.execute("INSERT INTO Users (username,pw_hash,role,created_at) VALUES (?,?,?,?) ON CONFLICT(username) DO UPDATE SET pw_hash=?,role=?",
+                          (uname,hash_pw(pw),role,datetime.now(timezone.utc).isoformat(),hash_pw(pw),role))
+            db_commit(); flash(f"User '{uname}' saved.","success")
+        rows=get_users()
+        return render("""
+<h4 class="fw-bold mb-4">User Management</h4><div class="row g-4">
+<div class="col-md-5"><div class="card"><div class="card-header fw-semibold">Add / Update User</div><div class="card-body">
+<form method="post">
+<div class="mb-3"><label class="form-label">Username</label><input name="username" class="form-control" required></div>
+<div class="mb-3"><label class="form-label">Password</label><input name="password" type="password" class="form-control" required></div>
+<div class="mb-3"><label class="form-label">Role</label>
+<select name="role" class="form-select"><option>admin</option><option>manager</option><option>viewer</option></select></div>
+<button class="btn btn-primary">Save User</button></form></div></div></div>
+<div class="col-md-7"><div class="card"><div class="card-body p-0"><table class="table table-hover mb-0">
+<thead><tr><th>ID</th><th>Username</th><th>Role</th><th>Created</th></tr></thead>
+<tbody>{% for u in rows %}<tr><td>{{u.user_id}}</td><td class="fw-semibold">{{u.username}}</td>
+<td><span class="badge badge-{{u.role}} text-white">{{u.role}}</span></td>
+<td style="font-size:.8rem">{{u.created_at[:10]}}</td></tr>{% endfor %}
+</tbody></table></div></div></div></div>""", active="users", rows=rows)
+
+    @app.route("/health")
+    def health(): return jsonify({"status":"ok","db":"postgres" if USE_POSTGRES else "sqlite"})
 
     return app
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  TKINTER DESKTOP APP  (unchanged structure, enhanced with search + PDF btn)
-# ═════════════════════════════════════════════════════════════════════════════
-def run_desktop():
-    import tkinter as tk
-    from tkinter import ttk, messagebox, simpledialog, filedialog, colorchooser
-
-    class LoanApp:
-        def __init__(self, root):
-            self.root = root
-            root.title("Vehicle Loan Management v6.0")
-            root.geometry("1280x920")
-
-            # Session / role
-            self.session_role = None
-            self.session_user = None
-            self._login_dialog()
-
-            self.tab = ttk.Notebook(root)
-            self.tab.pack(fill="both", expand=True)
-            self._filter_job = None
-            self._chart_figs = []
-
-            self.build_dashboard_tab()
-            self.build_entry_tab()
-            self.build_approval_tab()
-            self.build_customers_tab()
-            self.build_emi_tab()
-            self.build_closed_tab()
-            self.build_rejected_tab()
-            self.build_alerts_tab()
-            self.build_calculator_tab()
-            self.refresh_all()
-
-        # ── Login ──────────────────────────────────────────────────────────
-        def _login_dialog(self):
-            win = tk.Toplevel(self.root)
-            win.title("Login"); win.grab_set(); win.resizable(False, False)
-            frm = ttk.Frame(win, padding=20); frm.pack()
-            ttk.Label(frm, text="Vehicle Loan Manager", font=("Segoe UI",14,"bold")).grid(row=0,column=0,columnspan=2,pady=8)
-            ttk.Label(frm, text="Username:").grid(row=1,column=0,sticky="w")
-            u_ent = ttk.Entry(frm, width=20); u_ent.grid(row=1,column=1,pady=4)
-            ttk.Label(frm, text="Password:").grid(row=2,column=0,sticky="w")
-            p_ent = ttk.Entry(frm, width=20, show="*"); p_ent.grid(row=2,column=1,pady=4)
-            msg   = ttk.Label(frm, text="", foreground="red"); msg.grid(row=3,column=0,columnspan=2)
-
-            def attempt():
-                user = authenticate_user(u_ent.get().strip(), p_ent.get().strip())
-                if user:
-                    self.session_user = user["username"]
-                    self.session_role = user["role"]
-                    win.destroy()
-                else:
-                    msg.config(text="Invalid credentials")
-
-            ttk.Button(frm, text="Login", command=attempt).grid(row=4,column=0,columnspan=2,pady=8)
-            ttk.Label(frm, text="Defaults: admin/admin123  manager/manager123  viewer/viewer123",
-                      font=("Segoe UI",8), foreground="grey").grid(row=5,column=0,columnspan=2)
-            u_ent.focus()
-            win.bind("<Return>", lambda _: attempt())
-            self.root.wait_window(win)
-            if not self.session_role:
-                self.root.destroy(); raise SystemExit
-
-        def _perm(self, action):
-            return can_do(self.session_role, action)
-
-        # ── Dashboard ──────────────────────────────────────────────────────
-        def build_dashboard_tab(self):
-            frm = ttk.Frame(self.tab)
-            self.dashboard_tab = frm
-            self.tab.add(frm, text="Dashboard")
-
-            kpi_frame = ttk.Frame(frm); kpi_frame.pack(fill="x", padx=12, pady=6)
-            self.kpi_total_loans     = ttk.Label(kpi_frame, text="", font=("Segoe UI",18,"bold"), foreground="#0057b8")
-            self.kpi_total_loans.grid(row=0, column=0, padx=20)
-            self.kpi_total_loan_amt  = ttk.Label(kpi_frame, text="", font=("Segoe UI",14), foreground="#00844c")
-            self.kpi_total_loan_amt.grid(row=0, column=1, padx=20)
-            self.kpi_total_received  = ttk.Label(kpi_frame, text="", font=("Segoe UI",14), foreground="#0c2340")
-            self.kpi_total_received.grid(row=0, column=2, padx=20)
-            self.kpi_total_pending   = ttk.Label(kpi_frame, text="", font=("Segoe UI",14), foreground="#d7263d")
-            self.kpi_total_pending.grid(row=0, column=3, padx=20)
-            ttk.Label(kpi_frame, text=f"Role: {self.session_role.upper()}", font=("Segoe UI",10,"bold")).grid(row=0, column=4, padx=20)
-
-            vis_frame = ttk.LabelFrame(frm, text="Loan Visualizations", padding=10)
-            vis_frame.pack(fill="both", expand=True, padx=12, pady=6)
-            self.vis_frame = vis_frame
-
-            ctrl = ttk.Frame(frm); ctrl.pack(fill="x", padx=12, pady=6)
-            ttk.Label(ctrl, text="Compare (YYYY-MM to YYYY-MM):").grid(row=0, column=0, sticky="w")
-            self.compare_start = ttk.Entry(ctrl, width=12); self.compare_start.grid(row=0,column=1,padx=4)
-            self.compare_end   = ttk.Entry(ctrl, width=12); self.compare_end.grid(row=0,column=2,padx=4)
-            ttk.Button(ctrl, text="MoM/YoY", command=self.show_comparative_analysis).grid(row=0,column=3,padx=6)
-            ttk.Button(ctrl, text="Forecast 6mo", command=lambda: self.show_forecast(6)).grid(row=0,column=4,padx=6)
-            ttk.Button(ctrl, text="Export Charts", command=self.export_dashboard_charts).grid(row=0,column=5,padx=6)
-            ttk.Button(ctrl, text="Toggle Theme", command=self.toggle_theme).grid(row=0,column=6,padx=6)
-
-            alerts_frame = ttk.LabelFrame(frm, text="Payment Alerts", padding=10)
-            alerts_frame.pack(fill="x", padx=12, pady=6)
-            ttk.Label(alerts_frame, text="Overdue EMIs:", font=("Segoe UI",10,"bold")).pack(anchor="w")
-            self.lbl_overdue = ttk.Label(alerts_frame, text="", foreground="red", justify="left")
-            self.lbl_overdue.pack(anchor="w", fill="x")
-            ttk.Label(alerts_frame, text=f"Upcoming (next {UPCOMING_DAYS}d):", font=("Segoe UI",10,"bold")).pack(anchor="w", pady=(8,0))
-            self.lbl_upcoming = ttk.Label(alerts_frame, text="", foreground="orange", justify="left")
-            self.lbl_upcoming.pack(anchor="w", fill="x")
-
-            btn_frame = ttk.Frame(frm); btn_frame.pack(padx=12, pady=8, anchor="nw")
-            ttk.Button(btn_frame, text="Refresh", command=self.refresh_all).pack(side="left", padx=4)
-            ttk.Button(btn_frame, text="Export CSV", command=self.export_all_loans).pack(side="left", padx=4)
-            if self._perm("can_report"):
-                ttk.Button(btn_frame, text="Generate PDF Report", command=self.generate_pdf_report).pack(side="left", padx=4)
-            if GOOGLE_AVAILABLE:
-                ttk.Button(btn_frame, text="Sync Google", command=self.sync_now).pack(side="left", padx=4)
-
-            # Filters
-            ff = ttk.LabelFrame(frm, text="Filters (live)", padding=6); ff.pack(fill="x", padx=12, pady=4)
-            ttk.Label(ff, text="Date:").grid(row=0,column=0,padx=4)
-            self.filter_start = ttk.Entry(ff, width=12); self.filter_start.grid(row=0,column=1)
-            ttk.Label(ff, text="to").grid(row=0,column=2)
-            self.filter_end   = ttk.Entry(ff, width=12); self.filter_end.grid(row=0,column=3)
-            ttk.Label(ff, text="Type:").grid(row=0,column=4,padx=(12,0))
-            self.filter_type  = ttk.Combobox(ff, values=["","Car","Bike","Truck","Other"], width=10)
-            self.filter_type.grid(row=0,column=5)
-            ttk.Label(ff, text="Segment:").grid(row=0,column=6,padx=(12,0))
-            self.filter_segment = ttk.Entry(ff, width=10); self.filter_segment.grid(row=0,column=7)
-            ttk.Button(ff, text="Apply", command=self.refresh_all).grid(row=0,column=8,padx=8)
-            for w in (self.filter_start, self.filter_end, self.filter_segment):
-                w.bind("<KeyRelease>", self.on_filter_change)
-            self.filter_type.bind("<<ComboboxSelected>>", self.on_filter_change)
-
-        def generate_pdf_report(self):
-            if not REPORTLAB_AVAILABLE:
-                messagebox.showerror("Missing", "Install reportlab: pip install reportlab")
-                return
-            path = filedialog.asksaveasfilename(defaultextension=".pdf",
-                                                filetypes=[("PDF","*.pdf")],
-                                                initialfile="loan_report.pdf")
-            if not path:
-                return
-            filters = {"ltype": self.filter_type.get().strip() or None,
-                       "segment": self.filter_segment.get().strip() or None}
-            try:
-                generate_loan_report_pdf(path, filters)
-                messagebox.showinfo("Done", f"PDF report saved to:\n{path}")
-            except Exception as e:
-                messagebox.showerror("Error", str(e))
-
-        # ── Entry tab ──────────────────────────────────────────────────────
-        def build_entry_tab(self):
-            frm = ttk.Frame(self.tab)
-            self.tab.add(frm, text="Loan Entry")
-            if not self._perm("can_add"):
-                ttk.Label(frm, text="⛔  Your role cannot add loans.", font=("Segoe UI",12)).pack(pady=40)
-                return
-            form = ttk.Frame(frm, padding=12); form.pack(fill="x")
-            flds = [("Loan Number","e_ln"),("Customer Name","e_name"),("Vehicle Type","e_vehicle")]
-            for i,(lbl,attr) in enumerate(flds):
-                ttk.Label(form, text=lbl+":").grid(row=i,column=0,sticky="w")
-                ent = ttk.Entry(form, width=30); ent.grid(row=i,column=1,sticky="w",padx=6,pady=3)
-                setattr(self, attr, ent)
-            r2flds = [("Loan Amount","e_amount"),("Interest Rate","e_interest"),("Tenure (months)","e_tenure")]
-            for i,(lbl,attr) in enumerate(r2flds):
-                ttk.Label(form, text=lbl+":").grid(row=i,column=2,sticky="w")
-                ent = ttk.Entry(form, width=20); ent.grid(row=i,column=3,sticky="w",padx=6,pady=3)
-                setattr(self, attr, ent)
-            ttk.Label(form, text="Start Date (YYYY-MM-DD):").grid(row=3,column=0,sticky="w")
-            self.e_start = ttk.Entry(form, width=20); self.e_start.grid(row=3,column=1,sticky="w",padx=6,pady=3)
-            self.e_start.insert(0, date.today().isoformat())
-            ttk.Label(form, text="Customer Email:").grid(row=4,column=0,sticky="w")
-            self.e_email = ttk.Entry(form, width=30); self.e_email.grid(row=4,column=1,sticky="w",padx=6,pady=3)
-            ttk.Label(form, text="Attachment:").grid(row=5,column=0,sticky="w")
-            self.e_attachment = ttk.Entry(form, width=40); self.e_attachment.grid(row=5,column=1,sticky="w",padx=6,pady=3)
-            ttk.Button(form, text="Browse", command=self.browse_attachment).grid(row=5,column=2,padx=6)
-            ttk.Button(form, text="Add Loan Entry", command=self.add_loan_action).grid(row=6,column=0,columnspan=2,pady=10)
-
-        def browse_attachment(self):
-            path = filedialog.askopenfilename(filetypes=[("All files","*.*")])
-            if path:
-                self.e_attachment.delete(0, tk.END); self.e_attachment.insert(0, path)
-
-        # ── Approval tab ──────────────────────────────────────────────────
-        def build_approval_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Loan Approval")
-            top = ttk.Frame(frm); top.pack(fill="x", padx=8, pady=6)
-            ttk.Button(top, text="Refresh", command=self.load_pending).pack(side="left")
-            # Search
-            ttk.Label(top, text="Search:").pack(side="left", padx=(20,4))
-            self.approval_search = ttk.Entry(top, width=20); self.approval_search.pack(side="left")
-            self.approval_search.bind("<KeyRelease>", lambda _: self.load_pending())
-            cols = ("ID","Loan Number","Customer","Vehicle","Amount","Interest","Tenure","Start","Status")
-            self.tree_pending = ttk.Treeview(frm, columns=cols, show="headings", height=12)
-            for c in cols:
-                self.tree_pending.heading(c,text=c); self.tree_pending.column(c,width=100,anchor="center")
-            self.tree_pending.pack(fill="both", expand=True, padx=8, pady=8)
-            btnf = ttk.Frame(frm); btnf.pack(padx=8, pady=6)
-            if self._perm("can_approve"):
-                ttk.Button(btnf, text="Approve Selected", command=self.approve_selected).pack(side="left", padx=5)
-            if self._perm("can_reject"):
-                ttk.Button(btnf, text="Reject Selected", command=self.reject_selected).pack(side="left", padx=5)
-
-        # ── Customers tab ─────────────────────────────────────────────────
-        def build_customers_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Customers")
-            top = ttk.Frame(frm); top.pack(fill="x", padx=8, pady=6)
-            ttk.Button(top, text="Refresh", command=self.load_customers).pack(side="left")
-            ttk.Button(top, text="Show EMIs", command=self.open_emi_for_selected_customer).pack(side="left", padx=6)
-            ttk.Label(top, text="Search:").pack(side="left", padx=(20,4))
-            self.cust_search = ttk.Entry(top, width=20); self.cust_search.pack(side="left")
-            self.cust_search.bind("<KeyRelease>", lambda _: self.load_customers())
-            cols = ("CustomerID","LoanID","Name","Vehicle","LoanAmount","EMI_Amount","Status")
-            self.tree_customers = ttk.Treeview(frm, columns=cols, show="headings", height=14)
-            for c in cols:
-                self.tree_customers.heading(c,text=c); self.tree_customers.column(c,width=110,anchor="center")
-            self.tree_customers.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # ── EMI tab ───────────────────────────────────────────────────────
-        def build_emi_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="EMI Schedule")
-            top = ttk.Frame(frm); top.pack(fill="x", padx=8, pady=6)
-            ttk.Button(top, text="Refresh", command=self.load_emi_for_selected).pack(side="left")
-            ttk.Button(top, text="Flag Overdues", command=self.flag_all_overdues).pack(side="left", padx=6)
-            ttk.Button(top, text="Export EMI CSV", command=self.export_emi_csv).pack(side="left", padx=6)
-            cols = ("EMI_ID","LoanID","Inst#","DueDate","EMI_Amount","Status","PaidAt")
-            self.tree_emi = ttk.Treeview(frm, columns=cols, show="headings", height=16)
-            for c in cols:
-                self.tree_emi.heading(c,text=c); self.tree_emi.column(c,width=110,anchor="center")
-            self.tree_emi.pack(fill="both", expand=True, padx=8, pady=8)
-            btnf = ttk.Frame(frm); btnf.pack(padx=8, pady=6)
-            if self._perm("can_pay"):
-                ttk.Button(btnf, text="Pay Selected EMI", command=self.pay_selected_emi).pack(side="left", padx=6)
-            ttk.Button(btnf, text="View EMIs by Loan ID", command=self.prompt_and_load_emis).pack(side="left", padx=6)
-
-        # ── Closed / Rejected tabs ────────────────────────────────────────
-        def build_closed_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Closed Loans")
-            top = ttk.Frame(frm); top.pack(fill="x", padx=8, pady=6)
-            ttk.Button(top, text="Refresh", command=self.load_closed).pack(side="left")
-            ttk.Label(top, text="Search:").pack(side="left", padx=(20,4))
-            self.closed_search = ttk.Entry(top, width=20); self.closed_search.pack(side="left")
-            self.closed_search.bind("<KeyRelease>", lambda _: self.load_closed())
-            cols = ("LoanID","LoanNumber","Customer","Vehicle","LoanAmount","ClosedOn")
-            self.tree_closed = ttk.Treeview(frm, columns=cols, show="headings", height=12)
-            for c in cols:
-                self.tree_closed.heading(c,text=c); self.tree_closed.column(c,width=140,anchor="center")
-            self.tree_closed.pack(fill="both", expand=True, padx=8, pady=8)
-
-        def build_rejected_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Rejected Loans")
-            top = ttk.Frame(frm); top.pack(fill="x", padx=8, pady=6)
-            ttk.Button(top, text="Refresh", command=self.load_rejected).pack(side="left")
-            ttk.Label(top, text="Search:").pack(side="left", padx=(20,4))
-            self.rejected_search = ttk.Entry(top, width=20); self.rejected_search.pack(side="left")
-            self.rejected_search.bind("<KeyRelease>", lambda _: self.load_rejected())
-            cols = ("LoanID","LoanNumber","Customer","Reason","RejectedAt")
-            self.tree_rejected = ttk.Treeview(frm, columns=cols, show="headings", height=12)
-            for c in cols:
-                self.tree_rejected.heading(c,text=c); self.tree_rejected.column(c,width=140,anchor="center")
-            self.tree_rejected.pack(fill="both", expand=True, padx=8, pady=8)
-
-        # ── Alerts tab ────────────────────────────────────────────────────
-        def build_alerts_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Payment Alerts")
-            od_frame = ttk.LabelFrame(frm, text="Overdue EMIs", padding=10)
-            od_frame.pack(fill="both", expand=True, padx=12, pady=6)
-            cols = ("EMI_ID","Loan#","Customer","Due Date","Amount Due","Status","Days Overdue")
-            self.tree_overdue = ttk.Treeview(od_frame, columns=cols, show="headings", height=8)
-            for c in cols:
-                self.tree_overdue.heading(c,text=c); self.tree_overdue.column(c,width=120,anchor="center")
-            sb = ttk.Scrollbar(od_frame, orient="vertical", command=self.tree_overdue.yview)
-            self.tree_overdue.configure(yscrollcommand=sb.set)
-            self.tree_overdue.pack(side="left", fill="both", expand=True); sb.pack(side="right", fill="y")
-
-            up_frame = ttk.LabelFrame(frm, text=f"Upcoming ({UPCOMING_DAYS}d)", padding=10)
-            up_frame.pack(fill="both", expand=True, padx=12, pady=6)
-            cols2 = ("EMI_ID","Loan#","Customer","Due Date","Amount Due","Status","Days Until")
-            self.tree_upcoming = ttk.Treeview(up_frame, columns=cols2, show="headings", height=8)
-            for c in cols2:
-                self.tree_upcoming.heading(c,text=c); self.tree_upcoming.column(c,width=120,anchor="center")
-            sb2 = ttk.Scrollbar(up_frame, orient="vertical", command=self.tree_upcoming.yview)
-            self.tree_upcoming.configure(yscrollcommand=sb2.set)
-            self.tree_upcoming.pack(side="left", fill="both", expand=True); sb2.pack(side="right", fill="y")
-
-            btnf = ttk.Frame(frm); btnf.pack(padx=12, pady=8, anchor="nw")
-            ttk.Button(btnf, text="Refresh Alerts", command=self.load_alerts).pack(side="left", padx=4)
-            if self._perm("can_pay"):
-                ttk.Button(btnf, text="Send Overdue Reminders", command=self._send_reminders).pack(side="left", padx=4)
-
-        def _send_reminders(self):
-            threading.Thread(target=send_overdue_reminders, daemon=True).start()
-            messagebox.showinfo("Email", "Overdue reminder emails queued.")
-
-        # ── Calculator tab ────────────────────────────────────────────────
-        def build_calculator_tab(self):
-            frm = ttk.Frame(self.tab); self.tab.add(frm, text="Loan Calculator")
-            inp = ttk.LabelFrame(frm, text="Inputs", padding=12); inp.pack(fill="x", padx=12, pady=8)
-            ttk.Label(inp, text="Loan Amount:").grid(row=0,column=0,sticky="w")
-            self.calc_amount = ttk.Entry(inp, width=14); self.calc_amount.grid(row=0,column=1,padx=4)
-            ttk.Label(inp, text="Rate (%):").grid(row=0,column=2,sticky="w")
-            self.calc_rate = ttk.Entry(inp, width=8); self.calc_rate.grid(row=0,column=3,padx=4)
-            ttk.Label(inp, text="Tenure (mo):").grid(row=0,column=4,sticky="w")
-            self.calc_tenure = ttk.Entry(inp, width=8); self.calc_tenure.grid(row=0,column=5,padx=4)
-            ttk.Label(inp, text="EMI:").grid(row=1,column=0,sticky="w")
-            self.calc_emi = ttk.Entry(inp, width=14); self.calc_emi.grid(row=1,column=1,padx=4)
-            ttk.Label(inp, text="Calculate:").grid(row=1,column=2,sticky="w")
-            self.calc_mode = ttk.Combobox(inp, values=["EMI","Affordability (Loan Amt)","Tenure","Interest Rate"], state="readonly", width=18)
-            self.calc_mode.grid(row=1,column=3,padx=4); self.calc_mode.set("EMI")
-            ttk.Button(inp, text="Calculate", command=self.calculate_loan).grid(row=1,column=4,padx=4)
-            ttk.Button(inp, text="Clear", command=self.clear_calculator_fields).grid(row=1,column=5,padx=4)
-            out = ttk.LabelFrame(frm, text="Results", padding=12); out.pack(fill="x", padx=12, pady=8)
-            self.calc_result_label = ttk.Label(out, text="", font=("Segoe UI",12,"bold"), foreground="#0057b8")
-            self.calc_result_label.pack(anchor="w", pady=4)
-            self.amort_tree = ttk.Treeview(out, columns=("Month","Principal","Interest","EMI","Balance"), show="headings", height=10)
-            for col in ("Month","Principal","Interest","EMI","Balance"):
-                self.amort_tree.heading(col,text=col); self.amort_tree.column(col,width=90,anchor="center")
-            self.amort_tree.pack(fill="both", expand=True, pady=6)
-
-        # ── Actions ───────────────────────────────────────────────────────
-        def refresh_all(self):
-            filters = {"start":   self.filter_start.get().strip(),
-                       "end":     self.filter_end.get().strip(),
-                       "ltype":   self.filter_type.get().strip(),
-                       "segment": self.filter_segment.get().strip()}
-            tl, tla, tr, tp = get_kpi_totals(filters)
-            self.kpi_total_loans.config(text=f"Total Loans: {tl}")
-            self.kpi_total_loan_amt.config(text=f"Disbursed: ₹{tla:,.2f}")
-            self.kpi_total_received.config(text=f"Received: ₹{tr:,.2f}")
-            self.kpi_total_pending.config(text=f"Pending: ₹{tp:,.2f}")
-            self.load_alerts_dashboard()
-            self.load_pending()
-            self.load_customers()
-            self.load_closed()
-            self.load_rejected()
-            self.load_alerts()
-            for r in self.tree_emi.get_children(): self.tree_emi.delete(r)
-            self.refresh_dashboard_charts(filters)
-
-        def load_pending(self):
-            q = getattr(self, "approval_search", None)
-            search = q.get().strip() if q else ""
-            for r in self.tree_pending.get_children(): self.tree_pending.delete(r)
-            for row in list_pending_loans(search):
-                self.tree_pending.insert("", tk.END, values=(
-                    row["id"],row["loan_number"],row["customer_name"],
-                    row["vehicle_type"],row["loan_amount"],
-                    round(row["interest_rate"],4),row["tenure"],
-                    row["start_date"],row["status"]))
-
-        def load_customers(self):
-            q = getattr(self, "cust_search", None)
-            search = q.get().strip() if q else ""
-            for r in self.tree_customers.get_children(): self.tree_customers.delete(r)
-            for row in list_customers(search):
-                self.tree_customers.insert("", tk.END, values=(
-                    row["customer_id"],row["loan_id"],row["name"],
-                    row["vehicle_type"],row["loan_amount"],
-                    row["emi_amount"],row["status"]))
-
-        def load_closed(self):
-            q = getattr(self, "closed_search", None)
-            search = q.get().strip() if q else ""
-            for r in self.tree_closed.get_children(): self.tree_closed.delete(r)
-            for row in list_closed_loans(search):
-                self.tree_closed.insert("", tk.END, values=(
-                    row["loan_id"],row["loan_number"],row["customer_name"],
-                    row["vehicle_type"],row["loan_amount"],row["closure_date"]))
-
-        def load_rejected(self):
-            q = getattr(self, "rejected_search", None)
-            search = q.get().strip() if q else ""
-            for r in self.tree_rejected.get_children(): self.tree_rejected.delete(r)
-            for row in list_rejected_loans(search):
-                self.tree_rejected.insert("", tk.END, values=(
-                    row["loan_id"],row["loan_number"],row["customer_name"],
-                    row["reason"],row["created_at"]))
-
-        def load_alerts_dashboard(self):
-            od = get_overdue_emis()
-            up = get_upcoming_emis()
-            if od:
-                txt = "\n".join(f"• {e['customer_name']} ({e['loan_number']}) ₹{(e['remaining_amount'] or e['emi_amount']):.2f} — {(date.today()-parse_date(e['due_date'])).days}d overdue" for e in od)
-            else:
-                txt = "No overdue EMIs"
-            self.lbl_overdue.config(text=txt)
-            if up:
-                txt2 = "\n".join(f"• {e['customer_name']} ({e['loan_number']}) ₹{(e['remaining_amount'] or e['emi_amount']):.2f} — due in {(parse_date(e['due_date'])-date.today()).days}d" for e in up)
-            else:
-                txt2 = f"No EMIs due within {UPCOMING_DAYS} days"
-            self.lbl_upcoming.config(text=txt2)
-
-        def load_alerts(self):
-            for r in self.tree_overdue.get_children(): self.tree_overdue.delete(r)
-            for r in self.tree_upcoming.get_children(): self.tree_upcoming.delete(r)
-            for emi in get_overdue_emis():
-                rem = emi["remaining_amount"] or emi["emi_amount"]
-                days = (date.today()-parse_date(emi["due_date"])).days
-                self.tree_overdue.insert("", tk.END, values=(
-                    emi["emi_id"],emi["loan_number"],emi["customer_name"],
-                    emi["due_date"],f"₹{rem:.2f}",
-                    "Partial" if emi["status"]=="Partial" else "Overdue", days))
-            for emi in get_upcoming_emis():
-                rem = emi["remaining_amount"] or emi["emi_amount"]
-                days = (parse_date(emi["due_date"])-date.today()).days
-                self.tree_upcoming.insert("", tk.END, values=(
-                    emi["emi_id"],emi["loan_number"],emi["customer_name"],
-                    emi["due_date"],f"₹{rem:.2f}",emi["status"],days))
-
-        def add_loan_action(self):
-            if not self._perm("can_add"):
-                messagebox.showerror("Permission", "Your role cannot add loans."); return
-            ln     = self.e_ln.get().strip()
-            name   = self.e_name.get().strip()
-            veh    = self.e_vehicle.get().strip()
-            amt    = self.e_amount.get().strip()
-            ir     = self.e_interest.get().strip()
-            tenure = self.e_tenure.get().strip()
-            start  = self.e_start.get().strip()
-            email  = self.e_email.get().strip()
-            att    = self.e_attachment.get().strip()
-            saved  = ""
-            if att:
-                try:
-                    fname = os.path.basename(att)
-                    dest  = os.path.join(ATTACHMENTS_DIR, fname)
-                    shutil.copy(att, dest); saved = dest
-                except Exception as e:
-                    messagebox.showerror("Attachment", str(e)); return
-            if not all([ln,name,veh,amt,ir,tenure,start]):
-                messagebox.showerror("Missing","All fields required"); return
-            try:
-                create_loan_entry(ln,name,veh,float(amt),float(ir),int(tenure),start,saved,email)
-                messagebox.showinfo("Success","Loan submitted for approval")
-                for ent in (self.e_ln,self.e_name,self.e_vehicle,self.e_amount,
-                            self.e_interest,self.e_tenure,self.e_email,self.e_attachment):
-                    ent.delete(0, tk.END)
-                self.e_start.delete(0,tk.END); self.e_start.insert(0,date.today().isoformat())
-                self.refresh_all()
-            except Exception as e:
-                messagebox.showerror("Error",str(e))
-
-        def approve_selected(self):
-            if not self._perm("can_approve"):
-                messagebox.showerror("Permission","Not allowed"); return
-            sel = self.tree_pending.selection()
-            if not sel: messagebox.showwarning("Select","Select a loan"); return
-            lid = self.tree_pending.item(sel[0])["values"][0]
-            pwd = simpledialog.askstring("Auth","Admin password:", show="*")
-            if pwd != ADMIN_PASSWORD: messagebox.showwarning("Auth","Wrong password"); return
-            try:
-                approve_loan(lid); messagebox.showinfo("Done","Loan approved"); self.refresh_all()
-            except Exception as e:
-                messagebox.showerror("Error",str(e))
-
-        def reject_selected(self):
-            if not self._perm("can_reject"):
-                messagebox.showerror("Permission","Not allowed"); return
-            sel = self.tree_pending.selection()
-            if not sel: messagebox.showwarning("Select","Select a loan"); return
-            lid = self.tree_pending.item(sel[0])["values"][0]
-            pwd = simpledialog.askstring("Auth","Admin password:", show="*")
-            if pwd != ADMIN_PASSWORD: messagebox.showwarning("Auth","Wrong password"); return
-            reason = simpledialog.askstring("Reason","Rejection reason:")
-            if not reason: messagebox.showwarning("Reason","Reason required"); return
-            try:
-                reject_loan(lid, reason); messagebox.showinfo("Done","Loan rejected"); self.refresh_all()
-            except Exception as e:
-                messagebox.showerror("Error",str(e))
-
-        def open_emi_for_selected_customer(self):
-            sel = self.tree_customers.selection()
-            if not sel: messagebox.showwarning("Select","Select a customer"); return
-            lid = self.tree_customers.item(sel[0])["values"][1]
-            self.load_emis_for_loan(lid)
-            self.tab.select(self.tab.index(self.tree_emi.master))
-
-        def load_emis_for_loan(self, loan_id):
-            for r in self.tree_emi.get_children(): self.tree_emi.delete(r)
-            for row in get_emis_for_loan(loan_id):
-                rem = row["remaining_amount"] if row["remaining_amount"] is not None else row["emi_amount"]
-                status = f"Partial (₹{rem:.2f})" if row["status"]=="Partial" else row["status"]
-                self.tree_emi.insert("", tk.END, values=(
-                    row["emi_id"],row["loan_id"],row["installment_no"],
-                    row["due_date"],row["emi_amount"],status,row["paid_at"]))
-
-        def load_emi_for_selected(self):
-            sel = self.tree_emi.selection()
-            if sel:
-                lid = self.tree_emi.item(sel[0])["values"][1]
-                self.load_emis_for_loan(lid)
-            else:
-                self.prompt_and_load_emis()
-
-        def prompt_and_load_emis(self):
-            ans = simpledialog.askstring("Loan ID","Enter loan id:")
-            if not ans: return
-            try:
-                self.load_emis_for_loan(int(ans))
-                self.tab.select(self.tab.index(self.tree_emi.master))
-            except Exception as e:
-                messagebox.showerror("Error",str(e))
-
-        def pay_selected_emi(self):
-            if not self._perm("can_pay"):
-                messagebox.showerror("Permission","Not allowed"); return
-            sel = self.tree_emi.selection()
-            if not sel: messagebox.showwarning("Select","Select an EMI"); return
-            emi_id = self.tree_emi.item(sel[0])["values"][0]
-            c = get_cur()
-            c.execute("SELECT * FROM EMI WHERE emi_id=?", (emi_id,))
-            emi = c.fetchone()
-            remaining = emi["remaining_amount"] if emi["remaining_amount"] is not None else emi["emi_amount"]
-            win = tk.Toplevel(self.root); win.title("EMI Payment")
-            frm = ttk.Frame(win, padding=10); frm.pack(fill="both", expand=True)
-            ttk.Label(frm, text=f"EMI: ₹{emi['emi_amount']:.2f}  Paid: ₹{emi['amount_paid'] or 0:.2f}  Remaining: ₹{remaining:.2f}").grid(row=0,column=0,columnspan=2,pady=4)
-            pay_var = tk.StringVar(value="full")
-            ttk.Radiobutton(frm, text="Full", variable=pay_var, value="full").grid(row=1,column=0,sticky="w")
-            ttk.Radiobutton(frm, text="Partial", variable=pay_var, value="partial").grid(row=1,column=1,sticky="w")
-            ttk.Label(frm, text="Amount:").grid(row=2,column=0,pady=2)
-            amt_ent = ttk.Entry(frm); amt_ent.grid(row=2,column=1,pady=2)
-            amt_ent.insert(0, f"{remaining:.2f}")
-            ttk.Label(frm, text="Extra Interest:").grid(row=3,column=0,pady=2)
-            int_ent = ttk.Entry(frm); int_ent.grid(row=3,column=1,pady=2)
-            int_ent.insert(0, "0.0")
-            def on_pay():
-                try:
-                    msg = pay_emi(emi_id, float(amt_ent.get()), float(int_ent.get()))
-                    messagebox.showinfo("Payment",msg); win.destroy()
-                    self.refresh_all(); self.load_emi_for_selected()
-                except Exception as e:
-                    messagebox.showerror("Error",str(e))
-            ttk.Button(frm, text="Pay", command=on_pay).grid(row=4,column=0,columnspan=2,pady=8)
-            ttk.Button(frm, text="Cancel", command=win.destroy).grid(row=5,column=0,columnspan=2)
-
-        def flag_all_overdues(self):
-            today = date.today().isoformat()
-            c = get_cur()
-            c.execute(_adapt_sql("""UPDATE EMI SET status='Overdue'
-                         WHERE (status='Pending' OR status='Partial')
-                         AND due_date < ? AND (remaining_amount > 0 OR remaining_amount IS NULL)"""),
-                      (today,))
-            get_conn().commit()
-            messagebox.showinfo("Done","Overdue flagging complete")
-            self.refresh_all()
-
-        def export_all_loans(self):
-            path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")])
-            if not path: return
-            c = get_cur()
-            c.execute("SELECT * FROM LoanEntry")
-            rows = c.fetchall()
-            if not rows:
-                messagebox.showinfo("Empty","No loans to export"); return
-            with open(path,"w",newline="",encoding="utf-8") as f:
-                w = csv.writer(f)
-                keys = list(rows[0].keys())
-                w.writerow(keys)
-                for r in rows: w.writerow([r[k] for k in keys])
-            messagebox.showinfo("Exported",f"{len(rows)} loans exported")
-
-        def export_emi_csv(self):
-            path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")])
-            if not path: return
-            c = get_cur()
-            c.execute("SELECT * FROM EMI ORDER BY loan_id,installment_no")
-            rows = c.fetchall()
-            if not rows:
-                messagebox.showinfo("Empty","No EMIs to export"); return
-            with open(path,"w",newline="",encoding="utf-8") as f:
-                w = csv.writer(f)
-                keys = list(rows[0].keys())
-                w.writerow(keys)
-                for r in rows: w.writerow([r[k] for k in keys])
-            messagebox.showinfo("Exported",f"{len(rows)} EMIs exported")
-
-        def on_filter_change(self, *_):
-            if self._filter_job: self.root.after_cancel(self._filter_job)
-            self._filter_job = self.root.after(700, self._on_filter_apply)
-
-        def _on_filter_apply(self):
-            self._filter_job = None; self.refresh_all()
-
-        def toggle_theme(self):
-            CHART_COLORS["background"] = "dark" if CHART_COLORS["background"]!="dark" else "light"
-            self.refresh_all()
-
-        def sync_now(self):
-            ok = self.sync_to_google()
-            if ok: messagebox.showinfo("Sync","Synced to Google Sheets")
-            else:  messagebox.showerror("Sync","Failed")
-
-        def sync_to_google(self):
-            if not GOOGLE_AVAILABLE: return False
-            try:
-                creds  = Credentials.from_service_account_file(GOOGLE_JSON_KEYFILE,
-                            scopes=["https://www.googleapis.com/auth/spreadsheets"])
-                client = gspread.authorize(creds)
-                sheet  = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-                sheet.clear()
-                c = get_cur()
-                c.execute("SELECT * FROM LoanEntry")
-                rows = c.fetchall()
-                if rows:
-                    keys = list(rows[0].keys())
-                    sheet.append_row(keys)
-                    for r in rows: sheet.append_row([r[k] for k in keys])
-                return True
-            except Exception as e:
-                print("Sync failed:", e); return False
-
-        # ── Charts ────────────────────────────────────────────────────────
-        def refresh_dashboard_charts(self, filters=None):
-            self._chart_figs = []
-            for child in self.vis_frame.winfo_children(): child.destroy()
-            if not MATPLOTLIB_AVAILABLE: return
-
-            fsql, fp = "", []
-            if filters:
-                if filters.get("start"):  fsql += " AND le.created_at>=?"; fp.append(filters["start"])
-                if filters.get("end"):    fsql += " AND le.created_at<=?"; fp.append(filters["end"])
-                if filters.get("ltype"):  fsql += " AND le.vehicle_type=?"; fp.append(filters["ltype"])
-                if filters.get("segment"):fsql += " AND le.customer_name LIKE ?"; fp.append(f"%{filters['segment']}%")
-
-            if CHART_COLORS["background"]=="dark": plt.style.use("dark_background")
-            else: plt.style.use("default")
-
-            # Bar
-            c = get_cur()
-            c.execute(_adapt_sql(f"""SELECT SUM(le.loan_amount) as tl,
-                          SUM(e.emi_amount) as pe
-                          FROM LoanEntry le
-                          LEFT JOIN EMI e ON le.id=e.loan_id AND e.status IN ('Pending','Overdue')
-                          WHERE 1=1 {fsql}"""), fp)
-            row = c.fetchone()
-            fig_bar, ax = plt.subplots(figsize=(3,2))
-            vals = [row["tl"] or 0, row["pe"] or 0]
-            ax.bar(["Total Disbursed","Pending"], vals, color=[CHART_COLORS["primary"],CHART_COLORS["danger"]])
-            ax.set_title("Total vs Pending"); ax.set_ylabel("Rs")
-            for i,v in enumerate(vals): ax.text(i,v,f'{v:,.0f}',ha='center',va='bottom',fontsize=7)
-            fig_bar.tight_layout()
-            FigureCanvasTkAgg(fig_bar, master=self.vis_frame).get_tk_widget().pack(side="left",padx=6,pady=6)
-            FigureCanvasTkAgg(fig_bar, master=self.vis_frame).draw()
-            self._chart_figs.append(fig_bar)
-
-            # Pie
-            c.execute(_adapt_sql(f"""SELECT
-                SUM(CASE WHEN le.status='Approved' THEN 1 ELSE 0 END) AS Act,
-                SUM(CASE WHEN le.status='Closed'   THEN 1 ELSE 0 END) AS Clo,
-                SUM(CASE WHEN e.status='Overdue'   THEN 1 ELSE 0 END) AS Ov
-                FROM LoanEntry le LEFT JOIN EMI e ON le.id=e.loan_id
-                WHERE 1=1 {fsql}"""), fp)
-            res = c.fetchone()
-            fig_pie, ax2 = plt.subplots(figsize=(2.5,2.5))
-            ax2.pie([res["Act"] or 0,res["Clo"] or 0,res["Ov"] or 0],
-                    labels=["Active","Closed","Overdue"],
-                    autopct="%1.0f%%", startangle=90,
-                    colors=[CHART_COLORS["primary"],CHART_COLORS["secondary"],CHART_COLORS["danger"]],
-                    wedgeprops=dict(width=0.6))
-            ax2.set_title("Status Distribution")
-            fig_pie.tight_layout()
-            FigureCanvasTkAgg(fig_pie, master=self.vis_frame).get_tk_widget().pack(side="left",padx=6,pady=6)
-            FigureCanvasTkAgg(fig_pie, master=self.vis_frame).draw()
-            self._chart_figs.append(fig_pie)
-
-            # Line
-            months, amounts = get_monthly_paid_series(
-                filters.get("start") if filters else None,
-                filters.get("end")   if filters else None,
-                filters.get("ltype") if filters else None,
-                filters.get("segment") if filters else None)
-            fig_line, ax3 = plt.subplots(figsize=(3,2))
-            if months:
-                ax3.plot(months, amounts, marker="o", color=CHART_COLORS["primary"])
-                ax3.set_xticklabels(months, rotation=45, ha="right", fontsize=6)
-            ax3.set_title("Monthly Repayments"); ax3.set_ylabel("₹")
-            fig_line.tight_layout()
-            FigureCanvasTkAgg(fig_line, master=self.vis_frame).get_tk_widget().pack(side="left",padx=6,pady=6)
-            FigureCanvasTkAgg(fig_line, master=self.vis_frame).draw()
-            self._chart_figs.append(fig_line)
-
-        def show_comparative_analysis(self):
-            start_label = self.compare_start.get().strip()
-            end_label   = self.compare_end.get().strip()
-            sd, ed = None, None
-            try:
-                if start_label and len(start_label)==7:
-                    sd = f"{start_label}-01T00:00:00"
-                if end_label and len(end_label)==7:
-                    y,m = map(int,end_label.split("-"))
-                    ed  = f"{y:04d}-{m:02d}-{calendar.monthrange(y,m)[1]}T23:59:59"
-            except Exception:
-                messagebox.showerror("Error","Use YYYY-MM format"); return
-            months, amounts = get_monthly_paid_series(sd, ed)
-            if not months: messagebox.showinfo("No data","No paid EMIs in range"); return
-            mom, yoy = compute_mom_yoy(months, amounts)
-            win = tk.Toplevel(self.root); win.title("MoM / YoY")
-            frm = ttk.Frame(win, padding=10); frm.pack(fill="both", expand=True)
-            if MATPLOTLIB_AVAILABLE:
-                fig, ax = plt.subplots(figsize=(8,3))
-                ax.plot(months, amounts, marker="o", color=CHART_COLORS["primary"])
-                for i,m in enumerate(months):
-                    extras = []
-                    if mom.get(m) is not None: extras.append(f"MoM:{mom[m]:+.1f}%")
-                    if yoy.get(m) is not None: extras.append(f"YoY:{yoy[m]:+.1f}%")
-                    ax.text(i, amounts[i], f"{amounts[i]:,.0f}\n"+(" | ".join(extras)), fontsize=7, ha="center", va="bottom")
-                ax.set_title("Paid Amounts — MoM/YoY"); ax.set_xticklabels(months, rotation=45, ha="right")
-                fig.tight_layout()
-                FigureCanvasTkAgg(fig, master=frm).get_tk_widget().pack(fill="both", expand=True)
-                FigureCanvasTkAgg(fig, master=frm).draw()
-            txt = tk.Text(frm, height=8, wrap="word"); txt.pack(fill="both", expand=True, pady=4)
-            for m,a in zip(months, amounts):
-                line = f"{m}: ₹{a:,.2f}"
-                if mom.get(m) is not None: line += f"  MoM:{mom[m]:+.2f}%"
-                if yoy.get(m) is not None: line += f"  YoY:{yoy[m]:+.2f}%"
-                txt.insert("end", line+"\n")
-            ttk.Button(frm, text="Close", command=win.destroy).pack(pady=4)
-
-        def show_forecast(self, months_ahead=6):
-            months, amounts = get_monthly_paid_series()
-            pl, preds = forecast_payments(months, amounts, months_ahead)
-            win = tk.Toplevel(self.root); win.title("Forecast")
-            frm = ttk.Frame(win, padding=10); frm.pack(fill="both", expand=True)
-            if MATPLOTLIB_AVAILABLE:
-                fig, ax = plt.subplots(figsize=(8,3))
-                if months: ax.plot(months, amounts, marker="o", label="Historical", color=CHART_COLORS["primary"])
-                ax.plot(pl, preds, marker="o", linestyle="--", label="Forecast", color=CHART_COLORS["secondary"])
-                ax.set_xticklabels(months+pl, rotation=45, ha="right"); ax.legend()
-                ax.set_title("Payment Forecast"); fig.tight_layout()
-                FigureCanvasTkAgg(fig, master=frm).get_tk_widget().pack(fill="both", expand=True)
-                FigureCanvasTkAgg(fig, master=frm).draw()
-                self._chart_figs.append(fig)
-            txt = tk.Text(frm, height=8, wrap="word"); txt.pack(fill="both", expand=True, pady=4)
-            for l,v in zip(pl, preds): txt.insert("end", f"{l}: ₹{v:,.2f}\n")
-            ttk.Button(frm, text="Close", command=win.destroy).pack(pady=4)
-
-        def export_dashboard_charts(self):
-            if not MATPLOTLIB_AVAILABLE or not self._chart_figs:
-                messagebox.showinfo("Nothing","No charts to export"); return
-            folder = filedialog.askdirectory(title="Save charts to folder")
-            if not folder: return
-            for i,fig in enumerate(self._chart_figs):
-                try: fig.savefig(os.path.join(folder,f"chart_{i+1}.png"), dpi=150, bbox_inches="tight")
-                except Exception: pass
-            try:
-                pdf_path = os.path.join(folder,"dashboard_charts.pdf")
-                with PdfPages(pdf_path) as pdf:
-                    for fig in self._chart_figs: pdf.savefig(fig, bbox_inches="tight")
-                messagebox.showinfo("Done",f"Exported to {folder}")
-            except Exception as e:
-                messagebox.showwarning("Partial",f"PNG ok. PDF failed: {e}")
-
-        def calculate_loan(self):
-            mode = self.calc_mode.get()
-            try:
-                amt    = float(self.calc_amount.get() or 0)
-                rate   = float(self.calc_rate.get()   or 0) / 100.0 / 12.0
-                tenure = int(float(self.calc_tenure.get() or 0))
-                emi    = float(self.calc_emi.get()    or 0)
-                result = ""; p_list, i_list, b_list = [], [], []
-
-                if mode == "EMI":
-                    if amt>0 and rate>0 and tenure>0:
-                        ev = amt*rate*(1+rate)**tenure/((1+rate)**tenure-1)
-                        self.calc_emi.delete(0,tk.END); self.calc_emi.insert(0,f"{ev:.2f}")
-                        result = f"EMI: ₹{ev:.2f}/month"; bal = amt
-                        for _ in range(tenure):
-                            intr = bal*rate; prin = ev-intr; bal -= prin
-                            p_list.append(max(prin,0)); i_list.append(max(intr,0)); b_list.append(max(bal,0))
-                    else: result="Enter Amount, Rate, Tenure"
-                elif mode == "Affordability (Loan Amt)":
-                    if emi>0 and rate>0 and tenure>0:
-                        av = emi*((1+rate)**tenure-1)/(rate*(1+rate)**tenure)
-                        self.calc_amount.delete(0,tk.END); self.calc_amount.insert(0,f"{av:.2f}")
-                        result = f"Affordable Loan: ₹{av:.2f}"; bal = av
-                        for _ in range(tenure):
-                            intr = bal*rate; prin = emi-intr; bal -= prin
-                            p_list.append(max(prin,0)); i_list.append(max(intr,0)); b_list.append(max(bal,0))
-                    else: result="Enter EMI, Rate, Tenure"
-                elif mode == "Tenure":
-                    if amt>0 and rate>0 and emi>0:
-                        n = math.log(emi/(emi-amt*rate))/math.log(1+rate)
-                        tv = int(round(n))
-                        self.calc_tenure.delete(0,tk.END); self.calc_tenure.insert(0,str(tv))
-                        result = f"Tenure: {tv} months"; bal = amt
-                        for _ in range(tv):
-                            intr = bal*rate; prin = emi-intr; bal -= prin
-                            p_list.append(max(prin,0)); i_list.append(max(intr,0)); b_list.append(max(bal,0))
-                    else: result="Enter Amount, Rate, EMI"
-                elif mode == "Interest Rate":
-                    if amt>0 and tenure>0 and emi>0:
-                        lo,hi,r = 0.00001,1.0,None
-                        for _ in range(200):
-                            mid = (lo+hi)/2
-                            guess = amt*mid*(1+mid)**tenure/((1+mid)**tenure-1)
-                            if abs(guess-emi)<0.01: r=mid; break
-                            if guess>emi: hi=mid
-                            else: lo=mid
-                        if r:
-                            ar = r*12*100
-                            self.calc_rate.delete(0,tk.END); self.calc_rate.insert(0,f"{ar:.2f}")
-                            result = f"Rate: {ar:.2f}% p.a."
-                        else: result="Could not converge"
-                    else: result="Enter Amount, EMI, Tenure"
-
-                self.calc_result_label.config(text=result)
-                for r in self.amort_tree.get_children(): self.amort_tree.delete(r)
-                for i in range(len(p_list)):
-                    self.amort_tree.insert("",tk.END, values=(
-                        i+1, f"{p_list[i]:.2f}", f"{i_list[i]:.2f}",
-                        f"{p_list[i]+i_list[i]:.2f}", f"{b_list[i]:.2f}"))
-            except Exception as e:
-                self.calc_result_label.config(text=f"Error: {e}")
-
-        def clear_calculator_fields(self):
-            for ent in (self.calc_amount,self.calc_rate,self.calc_tenure,self.calc_emi):
-                ent.delete(0, tk.END)
-            self.calc_result_label.config(text="")
-            for r in self.amort_tree.get_children(): self.amort_tree.delete(r)
-
-    root = tk.Tk()
-    LoanApp(root)
-    root.mainloop()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ═════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    if "--web" in sys.argv:
-        flask_app = create_flask_app()
-        if flask_app:
-            print("\n" + "="*55)
-            print("  Vehicle Loan Manager — Web App")
-            print("  URL:  http://127.0.0.1:5000")
-            print("  Logins: admin/admin123  manager/manager123  viewer/viewer123")
-            print("="*55 + "\n")
-            flask_app.run(debug=True, use_reloader=False)
-        else:
-            print("Flask not available. Install it: pip install flask")
-    else:
-        run_desktop()
+    app = create_app()
+    app.run(debug=True, host="0.0.0.0", port=5000)
