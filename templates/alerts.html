@@ -1,74 +1,62 @@
 {% extends "base.html" %}
-{% block title %}Payment Alerts — Loan Manager{% endblock %}
 {% block content %}
-<div class="page-header">
-  <h1 class="page-title"><i class="bi bi-bell me-2 text-primary"></i>Payment Alerts</h1>
-</div>
+<h4 class="fw-bold mb-4">🔔 Payment Alerts</h4>
 
-<!-- Overdue -->
-<div class="d-flex align-items-center gap-2 mb-2">
-  <h5 class="mb-0 text-danger"><i class="bi bi-exclamation-triangle-fill me-1"></i>Overdue EMIs</h5>
-  <span class="badge bg-danger">{{ od|length }}</span>
-</div>
+<h5 class="text-danger mb-2">Overdue EMIs ({{ overdue|length }})</h5>
 <div class="card mb-4">
-  <div class="table-responsive">
-    <table class="table mb-0">
-      <thead><tr><th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th><th>Amount Due</th><th>Days Overdue</th><th></th></tr></thead>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-danger"><tr>
+        <th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th>
+        <th>Amount Due</th><th>Days Overdue</th><th>Action</th>
+      </tr></thead>
       <tbody>
-      {% for e in od %}
-      <tr class="table-danger">
-        <td class="fw-semibold">{{ e.loan_number }}</td>
+      {% for e in overdue %}
+      <tr>
+        <td><strong>{{ e.loan_number }}</strong></td>
         <td>{{ e.customer_name }}</td>
         <td>{{ e.installment_no }}</td>
-        <td class="text-danger fw-semibold">{{ e.due_date }}</td>
-        <td class="fw-semibold text-danger">₹{{ '{:,.2f}'.format(e.remaining_amount or e.emi_amount) }}</td>
-        <td>
-          <span class="badge bg-danger">
-            {{ (today - e.due_date|string)[:1] }}
-            {% set days = namespace(val=0) %}
-            {% if e.due_date %}
-              <span>overdue</span>
-            {% endif %}
-          </span>
-        </td>
-        <td><a href="/emis/{{ e.loan_id }}" class="btn btn-sm btn-outline-danger">View EMIs</a></td>
+        <td>{{ e.due_date }}</td>
+        <td>₹{{ "{:,.2f}".format(e.remaining_amount or e.emi_amount) }}</td>
+        <td><span class="badge bg-danger">{{ days_overdue[e.emi_id] }} days</span></td>
+        <td><a href="{{ url_for('emis', loan_id=e.loan_id) }}" class="btn btn-sm btn-outline-danger">Pay</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="text-center text-success py-3">
-        <i class="bi bi-check-circle-fill me-2"></i>No overdue EMIs — great!
-      </td></tr>
+      <tr><td colspan="7" class="text-center text-success py-3">No overdue EMIs ✓</td></tr>
       {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
 </div>
 
-<!-- Upcoming -->
-<div class="d-flex align-items-center gap-2 mb-2">
-  <h5 class="mb-0" style="color:#92400e"><i class="bi bi-clock-fill me-1"></i>Upcoming EMIs — Next 10 Days</h5>
-  <span class="badge bg-warning text-dark">{{ up|length }}</span>
-</div>
+<h5 class="text-warning mb-2">Upcoming EMIs — next 10 days ({{ upcoming|length }})</h5>
 <div class="card">
-  <div class="table-responsive">
-    <table class="table mb-0">
-      <thead><tr><th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th><th>Amount</th><th></th></tr></thead>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-warning"><tr>
+        <th>Loan #</th><th>Customer</th><th>Inst #</th><th>Due Date</th>
+        <th>Amount</th><th>Days Until Due</th><th>Action</th>
+      </tr></thead>
       <tbody>
-      {% for e in up %}
-      <tr class="table-warning">
-        <td class="fw-semibold">{{ e.loan_number }}</td>
+      {% for e in upcoming %}
+      <tr>
+        <td><strong>{{ e.loan_number }}</strong></td>
         <td>{{ e.customer_name }}</td>
         <td>{{ e.installment_no }}</td>
-        <td class="fw-semibold">{{ e.due_date }}</td>
-        <td class="fw-semibold">₹{{ '{:,.2f}'.format(e.remaining_amount or e.emi_amount) }}</td>
-        <td><a href="/emis/{{ e.loan_id }}" class="btn btn-sm btn-outline-warning">View EMIs</a></td>
+        <td>{{ e.due_date }}</td>
+        <td>₹{{ "{:,.2f}".format(e.remaining_amount or e.emi_amount) }}</td>
+        <td><span class="badge bg-warning text-dark">{{ days_upcoming[e.emi_id] }} days</span></td>
+        <td><a href="{{ url_for('emis', loan_id=e.loan_id) }}" class="btn btn-sm btn-outline-warning">View</a></td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="text-center text-muted py-3">
-        <i class="bi bi-calendar-check me-2"></i>No upcoming EMIs in next 10 days.
-      </td></tr>
+      <tr><td colspan="7" class="text-center text-muted py-3">No upcoming EMIs</td></tr>
       {% endfor %}
       </tbody>
     </table>
+    </div>
   </div>
 </div>
 {% endblock %}

@@ -1,47 +1,48 @@
 {% extends "base.html" %}
-{% block title %}Loan Approvals — Loan Manager{% endblock %}
 {% block content %}
-<div class="page-header">
-  <h1 class="page-title"><i class="bi bi-check2-circle me-2 text-primary"></i>Loan Approvals</h1>
-  <span class="badge bg-warning text-dark fs-6">{{ rows|length }} Pending</span>
+<h4 class="fw-bold mb-4">✅ Loan Approvals</h4>
+<form class="d-flex mb-3 gap-2" method="get">
+  <input name="q" value="{{ q }}" class="form-control search-bar" placeholder="Search...">
+  <button class="btn btn-outline-primary">Search</button>
+</form>
+{% if loans %}
+<div class="card">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+    <table class="table table-hover mb-0">
+      <thead class="table-dark"><tr>
+        <th>ID</th><th>Loan #</th><th>Customer</th><th>Type</th>
+        <th>Amount</th><th>Rate</th><th>Tenure</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+      {% for l in loans %}
+      <tr>
+        <td>{{ l.id }}</td><td><strong>{{ l.loan_number }}</strong></td>
+        <td>{{ l.customer_name }}</td><td>{{ l.vehicle_type }}</td>
+        <td>₹{{ "{:,.0f}".format(l.loan_amount) }}</td>
+        <td>{{ "{:.2f}".format(l.interest_rate*100) }}%</td>
+        <td>{{ l.tenure }}m</td>
+        <td>
+          <form method="post" class="d-inline">
+            <input type="hidden" name="loan_id" value="{{ l.id }}">
+            <input type="hidden" name="action" value="approve">
+            <button class="btn btn-success btn-sm" onclick="return confirm('Approve this loan?')">Approve</button>
+          </form>
+          <form method="post" class="d-inline ms-1" onsubmit="return checkReason(this)">
+            <input type="hidden" name="loan_id" value="{{ l.id }}">
+            <input type="hidden" name="action" value="reject">
+            <input name="reason" class="form-control d-inline" style="width:130px;display:inline-block!important;" placeholder="Reason" required>
+            <button class="btn btn-danger btn-sm ms-1">Reject</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
 </div>
-<div class="card mb-3"><div class="card-body py-2 px-3">
-<form method="GET" class="d-flex gap-2">
-  <div class="search-box"><i class="bi bi-search search-icon"></i>
-  <input type="text" name="q" value="{{ q_ }}" class="form-control" placeholder="Search..."></div>
-  <button class="btn btn-primary btn-sm">Search</button>
-</form></div></div>
-<div class="card"><div class="table-responsive"><table class="table mb-0">
-<thead><tr><th>Loan #</th><th>Customer</th><th>Type</th><th>Amount</th><th>Rate</th><th>Tenure</th><th>Start Date</th><th>Actions</th></tr></thead>
-<tbody>
-{% for l in rows %}
-<tr>
-  <td class="fw-semibold text-primary">{{ l.loan_number }}</td>
-  <td>{{ l.customer_name }}</td>
-  <td>{{ l.vehicle_type }}</td>
-  <td class="fw-semibold">₹{{ '{:,.0f}'.format(l.loan_amount) }}</td>
-  <td>{{ '{:.1f}'.format(l.interest_rate*100) }}%</td>
-  <td>{{ l.tenure }}m</td>
-  <td>{{ l.start_date }}</td>
-  <td>
-    <form method="POST" class="d-inline">
-      <input type="hidden" name="loan_id" value="{{ l.id }}">
-      <input type="hidden" name="action" value="approve">
-      <button class="btn btn-sm btn-success me-1"><i class="bi bi-check-lg me-1"></i>Approve</button>
-    </form>
-    <form method="POST" class="d-inline" onsubmit="return setReason(this)">
-      <input type="hidden" name="loan_id" value="{{ l.id }}">
-      <input type="hidden" name="action" value="reject">
-      <input type="hidden" name="reason">
-      <button type="submit" class="btn btn-sm btn-danger"><i class="bi bi-x-lg me-1"></i>Reject</button>
-    </form>
-  </td>
-</tr>
 {% else %}
-<tr><td colspan="8" class="text-center text-muted py-4">
-  <i class="bi bi-inbox fs-3 d-block mb-2"></i>No pending loans.
-</td></tr>
-{% endfor %}
-</tbody></table></div></div>
-<script>function setReason(f){var r=prompt('Enter rejection reason:');if(!r)return false;f.querySelector('[name=reason]').value=r;return true;}</script>
+<div class="alert alert-success">No pending loans requiring approval.</div>
+{% endif %}
 {% endblock %}
