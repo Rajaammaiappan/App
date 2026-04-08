@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="d-flex align-items-center gap-3 mb-4">
+  <h4 class="fw-bold mb-0">📅 EMI Schedule</h4>
+  {% if loan %}
+  <span class="badge bg-primary">{{ loan.loan_number }}</span>
+  <span class="text-muted small">{{ loan.customer_name }} · ₹{{ "{:,.0f}".format(loan.loan_amount) }}</span>
+  {% endif %}
+  <a href="{{ url_for('customers') }}" class="btn btn-sm btn-outline-secondary ms-auto">← Back to Customers</a>
+</div>
+
+{% if emis %}
+<!-- Summary strip -->
+{% set paid_count = emis|selectattr('status','eq','Paid')|list|length %}
+{% set total_count = emis|length %}
+<div class="d-flex gap-3 mb-3 flex-wrap">
+  <span class="badge bg-success px-3 py-2">✓ Paid: {{ paid_count }}</span>
+  <span class="badge bg-secondary px-3 py-2">⏳ Remaining: {{ total_count - paid_count }}</span>
+  <span class="badge bg-primary px-3 py-2">Total: {{ total_count }}</span>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-body p-0">
+    <div class="table-scroll">
+    <table class="table table-hover table-striped mb-0">
+      <thead class="table-dark"><tr>
+        <th>#</th><th>Due Date</th><th>EMI Amount</th><th>Paid</th>
+        <th>Remaining</th><th>Status</th><th>Paid At</th>
+        {% if session.role in ['admin','manager'] %}<th>Action</th>{% endif %}
+      </tr></thead>
+      <tbody>
+      {% for e in emis %}
+      <tr class="{{ 'table-success' if e.status=='Paid' else 'table-danger' if e.status=='Overdue' else 'table-warning' if e.status=='Partial' else '' }}">
+        <td>{{ e.installment_no }}</td>
+        <td>{{ e.due_date }}</td>
+        <td>₹{{ "{:,.2f}".format(e.emi_amount) }}</td>
+        <td>₹{{ "{:,.2f}".format(e.amount_paid or 0) }}</td>
+        <td>₹{{ "{:,.2f}".format(e.remaining_amount if e.remaining_amount is not none else e.emi_amount) }}</td>
+        <td>
+          <span class="badge
+            {{ 'bg-success' if e.status=='Paid' else
+               'bg-danger'  if e.status=='Overdue' else
+               'bg-warning text-dark' if e.status=='Partial' else
+               'bg-secondary' }}">{{ e.status }}</span>
+        </td>
+        <td>{{ e.paid_at[:16] if e.paid_at else '—' }}</td>
+        {% if session.role in ['admin','manager'] %}
+        <td>
+          {% if e.status != 'Paid' %}
+          <form method="post" action="{{ url_for('emi_pay') }}" class="d-flex gap-1 align-items-center">
+            <input type="hidden" name="emi_id" value="{{ e.emi_id }}">
+            <input type="hidden" name="loan_id" value="{{ loan_id }}">
+            <input name="pay_amount" type="number" step="0.01"
+                   value="{{ "{:.2f}".format(e.remaining_amount if e.remaining_amount is not none else e.emi_amount) }}"
+                   class="form-control form-control-sm" style="width:110px">
+            <button class="btn btn-success btn-sm">Pay</button>
+          </form>
+          {% else %}
+          <span class="text-muted small">—</span>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% else %}
+      <tr><td colspan="8" class="text-center text-muted py-4">No EMIs found for this loan.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

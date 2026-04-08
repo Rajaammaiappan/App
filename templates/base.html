@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Thendralla Fincorp — Loan Manager</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* ── BRAND COLOURS from logo ── */
+:root {
+  --tfc-blue:    #2B7DC8;   /* the blue hand */
+  --tfc-blue-dk: #1A5FA0;   /* darker blue for hover */
+  --tfc-grey:    #3D3D3D;   /* the dark grey hand */
+  --tfc-grey-lt: #5A5A5A;
+  --tfc-bg:      #F2F6FB;
+  --tfc-white:   #FFFFFF;
+  --tfc-accent:  #E8F1FB;   /* light blue tint */
+  --sidebar-w:   240px;
+  --topbar-h:    56px;
+  --bottombar-h: 62px;
+}
+
+/* ── BASE ── */
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--tfc-bg);font-family:'Poppins',sans-serif;min-height:100vh;color:#1a1a2e;}
+
+/* ══════════════════════════════════════════
+   TFC LOGO SVG (inline, no image needed)
+══════════════════════════════════════════ */
+.tfc-logo-wrap{
+  display:flex;align-items:center;gap:10px;
+  padding:14px 16px 12px;
+  border-bottom:1px solid rgba(255,255,255,.12);
+}
+.tfc-logo-svg{width:42px;height:42px;flex-shrink:0;}
+.tfc-logo-text{line-height:1.15;}
+.tfc-logo-text .company{font-size:12px;font-weight:700;color:#fff;letter-spacing:.3px;line-height:1.2;}
+.tfc-logo-text .tagline{font-size:9px;color:rgba(255,255,255,.6);letter-spacing:.5px;text-transform:uppercase;}
+
+/* ══════════════════════════════════════════
+   SIDEBAR
+══════════════════════════════════════════ */
+.sidebar{
+  width:var(--sidebar-w);flex-shrink:0;
+  background:linear-gradient(180deg, var(--tfc-grey) 0%, #2a2a2a 100%);
+  position:fixed;top:0;left:0;height:100vh;
+  overflow-y:auto;z-index:400;
+  transition:transform .28s cubic-bezier(.4,0,.2,1);
+}
+/* Scrollbar for sidebar */
+.sidebar::-webkit-scrollbar{width:3px;}
+.sidebar::-webkit-scrollbar-thumb{background:rgba(255,255,255,.2);border-radius:2px;}
+
+.sidebar .user-pill{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 16px 14px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+  margin-bottom:6px;
+}
+.sidebar .user-avatar{
+  width:32px;height:32px;border-radius:50%;
+  background:var(--tfc-blue);
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;font-weight:700;color:#fff;flex-shrink:0;
+}
+.sidebar .user-name{font-size:12px;color:#fff;font-weight:600;}
+.sidebar .user-role{font-size:10px;color:rgba(255,255,255,.5);}
+
+/* Nav links */
+.sidebar .nav-section{font-size:9px;color:rgba(255,255,255,.35);
+  letter-spacing:.08em;text-transform:uppercase;padding:10px 18px 4px;font-weight:600;}
+.sidebar a{
+  color:rgba(255,255,255,.72);text-decoration:none;
+  display:flex;align-items:center;gap:10px;
+  padding:9px 18px;font-size:13px;font-weight:500;
+  transition:all .18s;border-left:3px solid transparent;
+  position:relative;
+}
+.sidebar a i{width:18px;text-align:center;font-size:15px;flex-shrink:0;}
+.sidebar a:hover{
+  color:#fff;background:rgba(255,255,255,.07);
+  border-left-color:rgba(43,125,200,.5);
+}
+.sidebar a.active{
+  color:#fff;background:rgba(43,125,200,.2);
+  border-left-color:var(--tfc-blue);font-weight:600;
+}
+.sidebar .logout-link{color:#ff8a80!important;margin-top:8px;}
+.sidebar .logout-link:hover{background:rgba(255,80,80,.1)!important;border-left-color:#ff8a80!important;}
+
+/* ══════════════════════════════════════════
+   DESKTOP MAIN
+══════════════════════════════════════════ */
+.app-layout{display:flex;min-height:100vh;}
+.main-content{margin-left:var(--sidebar-w);flex:1;min-width:0;padding:28px 28px 28px;}
+
+/* ══════════════════════════════════════════
+   PAGE HEADER BAR
+══════════════════════════════════════════ */
+.page-topbar{
+  display:none; /* desktop: hidden */
+}
+
+/* ══════════════════════════════════════════
+   CARDS & KPI
+══════════════════════════════════════════ */
+.card{border:none;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.07);}
+.card-header{border-radius:12px 12px 0 0!important;font-weight:600;font-size:14px;}
+.kpi{border-radius:12px;padding:18px 16px;color:#fff;position:relative;overflow:hidden;}
+.kpi::after{content:'';position:absolute;right:-10px;top:-10px;
+  width:70px;height:70px;border-radius:50%;background:rgba(255,255,255,.08);}
+.kpi .val{font-size:24px;font-weight:700;line-height:1.2;}
+.kpi .lbl{font-size:11px;opacity:.82;margin-top:3px;font-weight:500;}
+.kpi .ico{position:absolute;right:16px;top:50%;transform:translateY(-50%);
+  font-size:28px;opacity:.22;}
+
+/* Branded KPI colours */
+.kpi-blue   {background:linear-gradient(135deg,var(--tfc-blue),#1A5FA0);}
+.kpi-green  {background:linear-gradient(135deg,#00844c,#00623a);}
+.kpi-teal   {background:linear-gradient(135deg,#1a7a4a,#0d5e38);}
+.kpi-red    {background:linear-gradient(135deg,#d7263d,#b01c2e);}
+.kpi-orange {background:linear-gradient(135deg,#e67e22,#c96a10);}
+.kpi-grey   {background:linear-gradient(135deg,var(--tfc-grey),#2a2a2a);}
+
+/* ── Badges ── */
+.badge-admin  {background:var(--tfc-blue)!important;}
+.badge-manager{background:#00844c!important;}
+.badge-viewer {background:#888!important;}
+
+/* ── Tables ── */
+.table th{font-size:11px;letter-spacing:.04em;text-transform:uppercase;}
+.table td{font-size:13px;vertical-align:middle;}
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;}
+.search-bar{max-width:320px;}
+
+/* ── Buttons ── */
+.btn-tfc{background:var(--tfc-blue);color:#fff;border:none;font-weight:600;}
+.btn-tfc:hover{background:var(--tfc-blue-dk);color:#fff;}
+
+/* ══════════════════════════════════════════
+   MOBILE  (<768px)
+══════════════════════════════════════════ */
+@media(max-width:767px){
+
+  .sidebar{transform:translateX(-100%);width:82%;max-width:290px;}
+  .sidebar.mob-open{transform:translateX(0);}
+
+  .mob-overlay{
+    display:none;position:fixed;inset:0;
+    background:rgba(0,0,0,.5);z-index:399;
+    backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);
+  }
+  .mob-overlay.show{display:block;}
+
+  .main-content{
+    margin-left:0;
+    padding:10px 10px calc(var(--bottombar-h) + 10px);
+  }
+
+  /* ── Mobile top bar ── */
+  .page-topbar{
+    display:flex!important;
+    position:fixed;top:0;left:0;right:0;height:var(--topbar-h);
+    background:linear-gradient(90deg,var(--tfc-grey) 0%,#2a2a2a 100%);
+    align-items:center;padding:0 14px;z-index:500;
+    box-shadow:0 2px 8px rgba(0,0,0,.25);gap:10px;
+  }
+  .page-topbar .ham{background:none;border:none;color:#fff;font-size:22px;padding:4px;cursor:pointer;flex-shrink:0;}
+  .page-topbar .tb-brand{flex:1;display:flex;align-items:center;gap:8px;}
+  .page-topbar .tb-brand span{font-size:13px;font-weight:700;color:#fff;line-height:1.2;}
+  .page-topbar .tb-brand small{font-size:9px;color:rgba(255,255,255,.5);display:block;}
+  .page-topbar .tb-right{flex-shrink:0;font-size:11px;}
+
+  .main-content{padding-top:calc(var(--topbar-h) + 10px);}
+
+  /* ── Mobile bottom tab bar ── */
+  .mob-bottombar{
+    display:flex!important;
+    position:fixed;bottom:0;left:0;right:0;height:var(--bottombar-h);
+    background:#fff;border-top:1px solid #dde3ec;z-index:500;
+    box-shadow:0 -2px 10px rgba(0,0,0,.08);
+  }
+  .mob-bottombar a{
+    flex:1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;font-size:10px;color:#888;
+    text-decoration:none;gap:3px;padding:6px 2px;
+    transition:color .15s;font-weight:500;
+  }
+  .mob-bottombar a i{font-size:19px;line-height:1;}
+  .mob-bottombar a.active{color:var(--tfc-blue);}
+  .mob-bottombar a.active i{font-weight:700;}
+  .mob-bottombar .tab-more{color:var(--tfc-grey);}
+
+  /* Tighter cards on mobile */
+  .kpi{padding:13px 12px;}
+  .kpi .val{font-size:18px;}
+  .kpi .lbl{font-size:10px;}
+  .kpi .ico{display:none;}
+}
+
+/* Desktop hides mobile-only elements */
+.mob-overlay{display:none;}
+.mob-bottombar{display:none;}
+</style>
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+
+<!-- ══ MOBILE TOP BAR ══ -->
+<div class="page-topbar">
+  <button class="ham" onclick="toggleDrawer()" aria-label="Menu">
+    <i class="bi bi-list" id="ham-icon"></i>
+  </button>
+  <div class="tb-brand">
+    <!-- Mini TFC SVG logo -->
+    <svg width="28" height="28" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <!-- Blue hand (top) -->
+      <path d="M30 8 C34 4, 46 6, 50 14 C54 22, 46 26, 40 24 C36 22, 30 20, 26 22 C22 24, 18 22, 20 16 C22 10, 26 12, 30 8Z" fill="#2B7DC8"/>
+      <path d="M26 22 C22 26, 18 28, 20 34 C22 38, 28 36, 32 34 C36 32, 42 30, 44 26 C46 22, 40 24, 36 26 C32 28, 28 28, 26 22Z" fill="#2B7DC8" opacity=".7"/>
+      <!-- Grey hand (bottom) -->
+      <path d="M30 52 C26 56, 14 54, 10 46 C6 38, 14 34, 20 36 C24 38, 30 40, 34 38 C38 36, 42 38, 40 44 C38 50, 34 48, 30 52Z" fill="#3D3D3D"/>
+      <path d="M34 38 C38 34, 42 32, 40 26 C38 22, 32 24, 28 26 C24 28, 18 30, 16 34 C14 38, 20 36, 24 34 C28 32, 32 32, 34 38Z" fill="#3D3D3D" opacity=".7"/>
+      <!-- TFC text hint -->
+      <text x="30" y="34" font-family="Poppins,sans-serif" font-size="9" font-weight="700" fill="#2B7DC8" text-anchor="middle" dominant-baseline="middle">TFC</text>
+    </svg>
+    <div>
+      <span>Thendralla Fincorp</span>
+      <small>Loan Manager</small>
+    </div>
+  </div>
+  {% if session.username %}
+  <div class="tb-right">
+    <span class="badge badge-{{ session.role }} text-white">{{ session.role }}</span>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ══ OVERLAY ══ -->
+<div class="mob-overlay" id="mob-overlay" onclick="closeDrawer()"></div>
+
+<!-- ══ APP LAYOUT ══ -->
+<div class="app-layout">
+
+  <!-- ══ SIDEBAR ══ -->
+  <nav class="sidebar" id="sidebar">
+
+    <!-- Logo block -->
+    <div class="tfc-logo-wrap">
+      <svg class="tfc-logo-svg" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- Blue hand -->
+        <path d="M40 10 C46 4, 62 8, 66 20 C70 30, 60 36, 52 32 C46 29, 38 26, 32 29 C26 32, 20 29, 23 20 C26 11, 34 16, 40 10Z" fill="#2B7DC8"/>
+        <path d="M32 29 C26 34, 20 38, 23 46 C26 52, 36 50, 42 46 C48 42, 58 38, 60 32 C62 26, 52 32, 46 34 C40 36, 34 36, 32 29Z" fill="#2B7DC8" opacity=".75"/>
+        <!-- Grey hand -->
+        <path d="M40 70 C34 76, 18 72, 14 60 C10 50, 20 44, 28 48 C34 51, 42 54, 48 51 C54 48, 60 51, 57 60 C54 69, 46 64, 40 70Z" fill="#3D3D3D"/>
+        <path d="M48 51 C54 46, 60 42, 57 34 C54 28, 44 30, 38 34 C32 38, 22 42, 20 48 C18 54, 28 48, 34 46 C40 44, 46 44, 48 51Z" fill="#3D3D3D" opacity=".75"/>
+        <!-- TFC -->
+        <text x="40" y="44" font-family="Poppins,sans-serif" font-size="12" font-weight="700" fill="#2B7DC8" text-anchor="middle" dominant-baseline="middle">TFC</text>
+      </svg>
+      <div class="tfc-logo-text">
+        <div class="company">Thendralla Fincorp</div>
+        <div class="tagline">Loan Manager</div>
+      </div>
+    </div>
+
+    {% if session.username %}
+    <!-- User pill -->
+    <div class="user-pill">
+      <div class="user-avatar">{{ session.username[0].upper() }}</div>
+      <div>
+        <div class="user-name">{{ session.username }}</div>
+        <div class="user-role">{{ session.role | capitalize }}</div>
+      </div>
+    </div>
+
+    <!-- Nav links -->
+    <div class="nav-section">Main</div>
+    <a href="{{ url_for('dashboard') }}"  class="{{ 'active' if active=='dashboard' }}"  onclick="closeDrawer()">
+      <i class="bi bi-speedometer2"></i>Dashboard</a>
+    <a href="{{ url_for('loans') }}"      class="{{ 'active' if active=='loans' }}"      onclick="closeDrawer()">
+      <i class="bi bi-file-earmark-text"></i>All Loans</a>
+    <a href="{{ url_for('customers') }}"  class="{{ 'active' if active=='customers' }}"  onclick="closeDrawer()">
+      <i class="bi bi-people"></i>Customers</a>
+    <a href="{{ url_for('alerts') }}"     class="{{ 'active' if active=='alerts' }}"     onclick="closeDrawer()">
+      <i class="bi bi-bell"></i>Alerts</a>
+
+    {% if session.role in ['admin','manager'] %}
+    <div class="nav-section">Actions</div>
+    <a href="{{ url_for('add_loan') }}"   class="{{ 'active' if active=='add' }}"        onclick="closeDrawer()">
+      <i class="bi bi-plus-circle"></i>New Loan</a>
+    <a href="{{ url_for('approval') }}"   class="{{ 'active' if active=='approval' }}"   onclick="closeDrawer()">
+      <i class="bi bi-check2-circle"></i>Approvals</a>
+    {% endif %}
+
+    <div class="nav-section">Records</div>
+    <a href="{{ url_for('closed') }}"     class="{{ 'active' if active=='closed' }}"     onclick="closeDrawer()">
+      <i class="bi bi-archive"></i>Closed Loans</a>
+    <a href="{{ url_for('rejected') }}"   class="{{ 'active' if active=='rejected' }}"   onclick="closeDrawer()">
+      <i class="bi bi-x-circle"></i>Rejected</a>
+
+    <div class="nav-section">Tools</div>
+    <a href="{{ url_for('calculator') }}" class="{{ 'active' if active=='calculator' }}" onclick="closeDrawer()">
+      <i class="bi bi-calculator"></i>Loan Calculator</a>
+    <a href="{{ url_for('report') }}"     class="{{ 'active' if active=='report' }}"     onclick="closeDrawer()">
+      <i class="bi bi-file-pdf"></i>PDF Report</a>
+
+    {% if session.role == 'admin' %}
+    <div class="nav-section">Admin</div>
+    <a href="{{ url_for('users') }}"      class="{{ 'active' if active=='users' }}"      onclick="closeDrawer()">
+      <i class="bi bi-shield-lock"></i>User Management</a>
+    {% endif %}
+
+    <a href="{{ url_for('logout') }}" class="logout-link mt-2" onclick="closeDrawer()">
+      <i class="bi bi-box-arrow-left"></i>Logout</a>
+    {% endif %}
+
+  </nav>
+
+  <!-- ══ MAIN CONTENT ══ -->
+  <div class="main-content">
+    {% with msgs = get_flashed_messages(with_categories=true) %}
+      {% for cat, msg in msgs %}
+      <div class="alert alert-{{ 'success' if cat=='success' else 'danger' }} alert-dismissible fade show py-2 mb-3" style="border-radius:10px;">
+        {{ msg }}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </div>
+
+</div><!-- .app-layout -->
+
+<!-- ══ MOBILE BOTTOM TAB BAR ══ -->
+{% if session.username %}
+<nav class="mob-bottombar">
+  <a href="{{ url_for('dashboard') }}"  class="{{ 'active' if active=='dashboard' }}">
+    <i class="bi bi-speedometer2"></i><span>Home</span></a>
+  <a href="{{ url_for('loans') }}"      class="{{ 'active' if active=='loans' }}">
+    <i class="bi bi-file-earmark-text"></i><span>Loans</span></a>
+  <a href="{{ url_for('customers') }}"  class="{{ 'active' if active=='customers' }}">
+    <i class="bi bi-people"></i><span>Customers</span></a>
+  <a href="{{ url_for('alerts') }}"     class="{{ 'active' if active=='alerts' }}">
+    <i class="bi bi-bell"></i><span>Alerts</span></a>
+  <a href="#" onclick="toggleDrawer();return false;" class="tab-more {{ 'active' if active not in ['dashboard','loans','customers','alerts'] }}">
+    <i class="bi bi-grid-3x3-gap"></i><span>More</span></a>
+</nav>
+{% endif %}
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function openDrawer(){
+  document.getElementById('sidebar').classList.add('mob-open');
+  document.getElementById('mob-overlay').classList.add('show');
+  document.getElementById('ham-icon').className='bi bi-x-lg';
+}
+function closeDrawer(){
+  document.getElementById('sidebar').classList.remove('mob-open');
+  document.getElementById('mob-overlay').classList.remove('show');
+  document.getElementById('ham-icon').className='bi bi-list';
+}
+function toggleDrawer(){
+  document.getElementById('sidebar').classList.contains('mob-open')
+    ? closeDrawer() : openDrawer();
+}
+// Swipe left to close
+let _sx=0;
+document.addEventListener('touchstart',e=>{_sx=e.touches[0].clientX;},{passive:true});
+document.addEventListener('touchend',e=>{
+  if(e.changedTouches[0].clientX-_sx < -55 &&
+     document.getElementById('sidebar').classList.contains('mob-open'))
+    closeDrawer();
+},{passive:true});
+</script>
+{% block extra_js %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="fw-bold mb-4">➕ New Loan Entry</h4>
+<div class="card col-md-8">
+  <div class="card-body">
+    <form method="post">
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Loan Number</label>
+          <input name="loan_number" class="form-control" placeholder="e.g. LN-2024-001" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Customer Name</label>
+          <input name="customer_name" class="form-control" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Customer Email</label>
+          <input name="customer_email" type="email" class="form-control" placeholder="optional">
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Vehicle Type</label>
+          <select name="vehicle_type" class="form-select">
+            <option>Car</option><option>Bike</option><option>Truck</option><option>Other</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">Loan Amount (₹)</label>
+          <input name="loan_amount" type="number" step="0.01" min="1" class="form-control" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">Interest Rate (annual %)</label>
+          <input name="interest_rate" type="number" step="0.01" min="0" class="form-control" placeholder="e.g. 12" required>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">Tenure (months)</label>
+          <input name="tenure" type="number" min="1" class="form-control" placeholder="e.g. 24" required>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Start Date</label>
+          <input name="start_date" type="date" class="form-control" value="{{ today }}" required>
+        </div>
+      </div>
+      <div class="mt-4 d-flex gap-2">
+        <button class="btn btn-primary px-4">Submit Loan</button>
+        <a href="{{ url_for('loans') }}" class="btn btn-secondary">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="fw-bold mb-4">🛡 User Management</h4>
+<div class="row g-3">
+  <div class="col-md-5">
+    <div class="card">
+      <div class="card-header bg-dark text-white fw-bold">Add / Update User</div>
+      <div class="card-body">
+        <form method="post">
+          <div class="mb-2">
+            <label class="form-label fw-semibold">Username</label>
+            <input name="username" class="form-control" required>
+          </div>
+          <div class="mb-2">
+            <label class="form-label fw-semibold">Password</label>
+            <input name="password" type="password" class="form-control" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Role</label>
+            <select name="role" class="form-select">
+              <option value="admin">Admin — full access</option>
+              <option value="manager">Manager — approve/pay/add</option>
+              <option value="viewer">Viewer — read only</option>
+            </select>
+          </div>
+          <button class="btn btn-primary w-100">Save User</button>
+        </form>
+      </div>
+    </div>
+    <div class="card mt-3">
+      <div class="card-header bg-white fw-semibold">Role Permissions</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead class="table-light"><tr><th>Role</th><th>Add</th><th>Approve</th><th>Pay</th><th>Report</th></tr></thead>
+          <tbody>
+            <tr><td><span class="badge badge-admin text-white">Admin</span></td>
+                <td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td><span class="badge badge-manager text-white">Manager</span></td>
+                <td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr>
+            <tr><td><span class="badge badge-viewer text-white">Viewer</span></td>
+                <td>—</td><td>—</td><td>—</td><td>✓</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-7">
+    <div class="card">
+      <div class="card-header bg-white fw-semibold">Existing Users ({{ users|length }})</div>
+      <div class="card-body p-0">
+        <table class="table table-hover mb-0">
+          <thead class="table-dark"><tr><th>ID</th><th>Username</th><th>Role</th><th>Created</th></tr></thead>
+          <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.user_id }}</td>
+            <td><strong>{{ u.username }}</strong></td>
+            <td><span class="badge badge-{{ u.role }} text-white">{{ u.role }}</span></td>
+            <td>{{ u.created_at[:10] }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
