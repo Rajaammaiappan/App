@@ -8,7 +8,6 @@ import os
 import sys
 import math
 import sqlite3
-import libsql_experimental as libsql
 import hashlib
 import secrets
 import calendar
@@ -106,11 +105,7 @@ def fmt_inr(v):
 #  DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
 def _make_conn():
-    if TURSO_URL and TURSO_TOKEN:
-        conn = libsql.connect(DB_FILE, sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
-        conn.sync()
-    else:
-        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
