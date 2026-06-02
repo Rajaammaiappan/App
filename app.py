@@ -8,6 +8,7 @@ import os
 import sys
 import math
 import sqlite3
+import libsql_experimental as libsql
 import hashlib
 import secrets
 import calendar
@@ -36,6 +37,8 @@ except ImportError:
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 DB_FILE       = os.environ.get("DB_FILE", "vehicle_loans.db")
+TURSO_URL     = os.environ.get("TURSO_URL", "")
+TURSO_TOKEN   = os.environ.get("TURSO_TOKEN", "")
 UPCOMING_DAYS = 10
 
 EMAIL_CONFIG = {
@@ -102,17 +105,24 @@ def fmt_inr(v):
 # ══════════════════════════════════════════════════════════════════════════════
 #  DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
+def _make_conn():
+    if TURSO_URL and TURSO_TOKEN:
+        conn = libsql.connect(DB_FILE, sync_url=TURSO_URL, auth_token=TURSO_TOKEN)
+        conn.sync()
+    else:
+        conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_FILE, check_same_thread=False)
-        g.db.row_factory = sqlite3.Row
+        g.db = _make_conn()
     return g.db
 
 def get_cur(): return get_db().cursor()
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    conn = _make_conn()
     cur = conn.cursor()
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS LoanEntry (
