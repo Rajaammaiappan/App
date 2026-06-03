@@ -36,8 +36,8 @@ except ImportError:
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 DB_FILE       = os.environ.get("DB_FILE", "vehicle_loans.db")
-TURSO_URL     = os.environ.get("TURSO_URL", "")
-TURSO_TOKEN   = os.environ.get("TURSO_TOKEN", "")
+TURSO_URL     = os.environ.get("libsql://vehile-loan-application-rajaammaiappan.aws-ap-northeast-1.turso.io", "")
+TURSO_TOKEN   = os.environ.get("eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODA0ODg1MzYsImlkIjoiMDE5ZTg5N2QtYWYwMS03ZDRlLWI3NWYtMDExZTg4ODIxNjkxIiwicmlkIjoiY2JhNjNmYzEtODcxNy00MDFkLTkwZmItY2RmYjM3NTZmZDA3In0.PiOwBqq9NztK6zJYF2hrQZ4rNWw1DRBeDFlQHDDCfWEGxhEjyrgZ2f1q7QHwIFMPbTUkpkJN9g7ADtzfKxw5AQ", "")
 UPCOMING_DAYS = 10
 
 EMAIL_CONFIG = {
