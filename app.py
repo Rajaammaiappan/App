@@ -13,6 +13,7 @@ import secrets
 import calendar
 import smtplib
 import threading
+import requests as http_req
 from datetime import date, datetime, timezone, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
@@ -36,8 +37,8 @@ except ImportError:
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 DB_FILE       = os.environ.get("DB_FILE", "vehicle_loans.db")
-TURSO_URL     = os.environ.get("libsql://vehile-loan-application-rajaammaiappan.aws-ap-northeast-1.turso.io", "")
-TURSO_TOKEN   = os.environ.get("eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODA0ODg1MzYsImlkIjoiMDE5ZTg5N2QtYWYwMS03ZDRlLWI3NWYtMDExZTg4ODIxNjkxIiwicmlkIjoiY2JhNjNmYzEtODcxNy00MDFkLTkwZmItY2RmYjM3NTZmZDA3In0.PiOwBqq9NztK6zJYF2hrQZ4rNWw1DRBeDFlQHDDCfWEGxhEjyrgZ2f1q7QHwIFMPbTUkpkJN9g7ADtzfKxw5AQ", "")
+TURSO_URL     = os.environ.get("TURSO_URL", "")
+TURSO_TOKEN   = os.environ.get("TURSO_TOKEN", "")
 UPCOMING_DAYS = 10
 
 EMAIL_CONFIG = {
@@ -102,9 +103,114 @@ def fmt_inr(v):
     except: return "₹0.00"
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  TURSO HTTP CLIENT (pure Python, no Rust/compilation needed)
+# ══════════════════════════════════════════════════════════════════════════════
+def _turso_val(v):
+    """Convert Python value to Turso arg format."""
+    if v is None:
+        return {"type": "null", "value": None}
+    if isinstance(v, bool):
+        return {"type": "integer", "value": str(int(v))}
+    if isinstance(v, int):
+        return {"type": "integer", "value": str(v)}
+    if isinstance(v, float):
+        return {"type": "float", "value": v}
+    return {"type": "text", "value": str(v)}
+
+def _from_turso_val(cell):
+    """Convert Turso response value to Python type."""
+    if cell is None or cell.get("type") == "null":
+        return None
+    t = cell.get("type", "text")
+    v = cell.get("value")
+    if t == "integer":
+        try: return int(v)
+        except: return v
+    if t == "float":
+        try: return float(v)
+        except: return v
+    return v
+
+class TursoRow(dict):
+    """Dict-like row that also supports integer index access."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+class TursoCursor:
+    def __init__(self, url, token):
+        self._url = url
+        self._token = token
+        self._rows = []
+        self._pos = 0
+        self.lastrowid = None
+
+    def _execute_http(self, sql, params=()):
+        stmt = {"sql": sql.strip()}
+        if params:
+            stmt["args"] = [_turso_val(p) for p in params]
+        resp = http_req.post(
+            f"{self._url}/v2/pipeline",
+            headers={"Authorization": f"Bearer {self._token}",
+                     "Content-Type": "application/json"},
+            json={"requests": [{"type": "execute", "stmt": stmt}, {"type": "close"}]},
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        res = data["results"][0]
+        if res.get("type") == "error":
+            raise Exception(res["error"]["message"])
+        result = res["response"]["result"]
+        cols = [c["name"] for c in result.get("cols", [])]
+        self._rows = [
+            TursoRow(zip(cols, [_from_turso_val(cell) for cell in row]))
+            for row in result.get("rows", [])
+        ]
+        self._pos = 0
+        rid = result.get("last_insert_rowid")
+        if rid is not None:
+            try: self.lastrowid = int(rid)
+            except: self.lastrowid = rid
+
+    def execute(self, sql, params=()):
+        self._execute_http(sql, params)
+        return self
+
+    def executescript(self, script):
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                self._execute_http(stmt)
+        return self
+
+    def fetchone(self):
+        if self._pos < len(self._rows):
+            row = self._rows[self._pos]; self._pos += 1; return row
+        return None
+
+    def fetchall(self):
+        rows = self._rows[self._pos:]; self._pos = len(self._rows); return rows
+
+    def __iter__(self): return iter(self._rows)
+
+class TursoConnection:
+    def __init__(self, url, token):
+        self._url = url.replace("libsql://", "https://")
+        self._token = token
+        self.row_factory = None
+
+    def cursor(self): return TursoCursor(self._url, self._token)
+    def commit(self): pass
+    def close(self): pass
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
 def _make_conn():
+    if TURSO_URL and TURSO_TOKEN:
+        return TursoConnection(TURSO_URL, TURSO_TOKEN)
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
@@ -178,7 +284,7 @@ def init_db():
         pw_hash TEXT,
         role TEXT,
         created_at TEXT
-    );
+    )
     """)
     for uname, info in DEFAULT_USERS.items():
         cur.execute("INSERT OR IGNORE INTO Users (username,pw_hash,role,created_at) VALUES (?,?,?,?)",
