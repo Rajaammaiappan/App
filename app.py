@@ -50,10 +50,21 @@ EMAIL_CONFIG = {
 # ── SMS CONFIG (Fast2SMS — India) ──────────────────────────────────────────────
 # Get free API key from https://www.fast2sms.com → Dashboard → Dev API
 # Set environment variable FAST2SMS_KEY=your_api_key on Render
-_SMS_KEY = os.environ.get("FAST2SMS_KEY", "")  # OR paste your key here directly
+# ── Paste your Fast2SMS API key between the quotes below ──────────────────────
+FAST2SMS_HARDCODED_KEY = "LfFIRMIxB3MKJQR3wKzY5QZQIWmUTAULcaP1uh0dDHqCzVf5oxYS7Ba18Zn9"   # <-- paste key here if not using environment variable
+
+def _get_sms_key():
+    """Returns API key from environment or hardcoded fallback."""
+    k = os.environ.get("FAST2SMS_KEY", "").strip()
+    if not k:
+        k = FAST2SMS_HARDCODED_KEY.strip()
+    return k
+
+def _sms_enabled():
+    k = _get_sms_key()
+    return bool(k and k != "YOUR_ACTUAL_KEY_HERE")
+
 SMS_CONFIG = {
-    "api_key": _SMS_KEY,
-    "enabled": bool(_SMS_KEY and _SMS_KEY.strip() and _SMS_KEY != "LfFIRMIxB3MKJQR3wKzY5QZQIWmUTAULcaP1uh0dDHqCzVf5oxYS7Ba18Zn9"),
     "sender_id": "TFCORP",
 }
 
@@ -540,7 +551,7 @@ def get_loan_type_breakdown():
 # ══════════════════════════════════════════════════════════════════════════════
 def _send_sms(mobile, message):
     """Send SMS via Fast2SMS. Returns (success:bool, info:str)."""
-    if not SMS_CONFIG.get("enabled"):
+    if not _sms_enabled():
         return False, "SMS not configured (FAST2SMS_KEY not set)"
     mobile = str(mobile or "").strip()
     if len(mobile) != 10:
@@ -574,7 +585,7 @@ def _send_sms(mobile, message):
 
 def _send_sms_bulk(mobiles, message):
     """Send SMS to multiple numbers."""
-    if not SMS_CONFIG.get("enabled"):
+    if not _sms_enabled():
         return False, "SMS not configured"
     nums = [str(m).strip() for m in mobiles if m and len(str(m).strip()) == 10]
     if not nums: return False, "No valid 10-digit numbers"
@@ -1841,7 +1852,7 @@ def alerts():
           <td><a class="btn btn-sm btn-amber" href="/emis/{g['lid']}">📋 View</a></td>
         </tr>"""
 
-    sms_on = SMS_CONFIG["enabled"]
+    sms_on = _sms_enabled()
     sms_badge = ('<span style="background:#059669;color:#fff;font-size:11px;padding:2px 8px;'
                  'border-radius:10px;margin-left:8px;">📱 SMS ON</span>' if sms_on else
                  '<span style="background:#6b7280;color:#fff;font-size:11px;padding:2px 8px;'
@@ -2149,7 +2160,7 @@ def api_breakdown():
 def api_sms_overdue():
     results, total = send_bulk_overdue_sms()
     return jsonify({"sent": total, "total": len(results), "results": results,
-                    "sms_enabled": SMS_CONFIG["enabled"]})
+                    "sms_enabled": _sms_enabled()})
 
 @app.route("/api/sms/upcoming", methods=["POST"])
 @login_required
@@ -2157,7 +2168,7 @@ def api_sms_overdue():
 def api_sms_upcoming():
     results, total = send_bulk_upcoming_sms()
     return jsonify({"sent": total, "total": len(results), "results": results,
-                    "sms_enabled": SMS_CONFIG["enabled"]})
+                    "sms_enabled": _sms_enabled()})
 
 @app.route("/api/sms/single", methods=["POST"])
 @login_required
@@ -2170,7 +2181,7 @@ def api_sms_single():
     if not mobile or not msg:
         return jsonify({"ok": False, "info": "Mobile and message required"})
     ok, info = _send_sms(mobile, msg)
-    return jsonify({"ok": ok, "info": info, "sms_enabled": SMS_CONFIG["enabled"]})
+    return jsonify({"ok": ok, "info": info, "sms_enabled": _sms_enabled()})
 
 @app.route("/sms_test", methods=["POST"])
 @login_required
@@ -2180,15 +2191,15 @@ def sms_test():
     data   = request.get_json() or {}
     mobile = str(data.get("mobile","")).strip()
     ok, info = _send_sms(mobile, f"Test SMS from Thendralla Fincorp. Your app SMS is working! -TFC")
-    return jsonify({"ok": ok, "info": info, "sms_enabled": SMS_CONFIG["enabled"],
-                    "api_key_set": bool(SMS_CONFIG["api_key"])})
+    return jsonify({"ok": ok, "info": info, "sms_enabled": _sms_enabled(),
+                    "api_key_set": bool(_get_sms_key())})
 
 @app.route("/sms_settings")
 @login_required
 @role_required("admin")
 def sms_settings():
     """SMS configuration status page."""
-    enabled = SMS_CONFIG["enabled"]
+    enabled = _sms_enabled()
     key_set = bool(SMS_CONFIG["api_key"])
     content = f"""
     <h1>📱 SMS Notification Settings</h1>
