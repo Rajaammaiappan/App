@@ -50,10 +50,11 @@ EMAIL_CONFIG = {
 # ── SMS CONFIG (Fast2SMS — India) ──────────────────────────────────────────────
 # Get free API key from https://www.fast2sms.com → Dashboard → Dev API
 # Set environment variable FAST2SMS_KEY=your_api_key on Render
+_SMS_KEY = os.environ.get("FAST2SMS_KEY", "")  # OR paste your key here directly
 SMS_CONFIG = {
-    "api_key": os.environ.get("FAST2SMS_KEY", "Uv2IV4r5B6dxySCeGlasKmh13oJ7YRHAZEMjXFztuDLnNf9PcTiNBGM3dyv7IaeWbox4LTmAKSYDwXkr"),   # Set this on Render
-    "enabled": bool(os.environ.get("FAST2SMS_KEY", "")),
-    "sender_id": "TFCORP",                            # 6-char sender ID (apply on Fast2SMS)
+    "api_key": _SMS_KEY,
+    "enabled": bool(_SMS_KEY and _SMS_KEY.strip() and _SMS_KEY != "LfFIRMIxB3MKJQR3wKzY5QZQIWmUTAULcaP1uh0dDHqCzVf5oxYS7Ba18Zn9"),
+    "sender_id": "TFCORP",
 }
 
 ROLES = {
@@ -538,76 +539,73 @@ def get_loan_type_breakdown():
 #  SMS via Fast2SMS (India)
 # ══════════════════════════════════════════════════════════════════════════════
 def _send_sms(mobile, message):
-    """Send SMS via Fast2SMS DLT route. Returns (success:bool, info:str)."""
+    """Send SMS via Fast2SMS. Returns (success:bool, info:str)."""
     if not SMS_CONFIG.get("enabled"):
         return False, "SMS not configured (FAST2SMS_KEY not set)"
-    if not mobile or len(str(mobile).strip()) != 10:
+    mobile = str(mobile or "").strip()
+    if len(mobile) != 10:
         return False, f"Invalid mobile: {mobile}"
     try:
         resp = http_req.post(
             "https://www.fast2sms.com/dev/bulkV2",
-            headers={"authorization": SMS_CONFIG["api_key"]},
-            data={
-                "route":   "q",           # transactional route (DLT registered)
-                "message": message[:160], # max 160 chars per SMS
-                "language":"english",
-                "flash":   0,
-                "numbers": str(mobile).strip(),
+            headers={
+                "authorization": SMS_CONFIG["api_key"],
+                "Content-Type":  "application/x-www-form-urlencoded",
+                "Cache-Control": "no-cache",
             },
-            timeout=10
+            data={
+                "route":    "v3",
+                "message":  message[:160],
+                "language": "english",
+                "flash":    "0",
+                "numbers":  mobile,
+            },
+            timeout=15
         )
+        print(f"[SMS] {resp.status_code} {resp.text}")
         result = resp.json()
-        if result.get("return"):
+        if result.get("return") == True:
             return True, f"SMS sent to {mobile}"
-        else:
-            return False, f"Fast2SMS error: {result.get('message','Unknown')}"
+        errmsg = result.get("message","Unknown error")
+        if isinstance(errmsg, list): errmsg = " | ".join(errmsg)
+        return False, f"Fast2SMS says: {errmsg}"
     except Exception as e:
-        return False, f"SMS exception: {e}"
+        return False, f"Exception: {e}"
 
 def _send_sms_bulk(mobiles, message):
-    """Send same SMS to multiple 10-digit numbers."""
+    """Send SMS to multiple numbers."""
     if not SMS_CONFIG.get("enabled"):
         return False, "SMS not configured"
-    nums = [str(m).strip() for m in mobiles if m and len(str(m).strip())==10]
-    if not nums:
-        return False, "No valid numbers"
+    nums = [str(m).strip() for m in mobiles if m and len(str(m).strip()) == 10]
+    if not nums: return False, "No valid 10-digit numbers"
     try:
         resp = http_req.post(
             "https://www.fast2sms.com/dev/bulkV2",
-            headers={"authorization": SMS_CONFIG["api_key"]},
-            data={
-                "route":   "q",
-                "message": message[:160],
-                "language":"english",
-                "flash":   0,
-                "numbers": ",".join(nums),
+            headers={
+                "authorization": SMS_CONFIG["api_key"],
+                "Content-Type":  "application/x-www-form-urlencoded",
+                "Cache-Control": "no-cache",
             },
-            timeout=10
+            data={
+                "route":    "v3",
+                "message":  message[:160],
+                "language": "english",
+                "flash":    "0",
+                "numbers":  ",".join(nums),
+            },
+            timeout=15
         )
+        print(f"[SMS Bulk] {resp.status_code} {resp.text}")
         result = resp.json()
-        if result.get("return"):
+        if result.get("return") == True:
             return True, f"SMS sent to {len(nums)} number(s)"
-        else:
-            return False, f"Fast2SMS error: {result.get('message','Unknown')}"
+        errmsg = result.get("message","Unknown")
+        if isinstance(errmsg, list): errmsg = " | ".join(errmsg)
+        return False, f"Fast2SMS says: {errmsg}"
     except Exception as e:
-        return False, f"SMS exception: {e}"
+        return False, f"Exception: {e}"
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  EMAIL
-# ══════════════════════════════════════════════════════════════════════════════
-def _send_email(to,subject,body):
-    if not EMAIL_CONFIG.get("enabled") or not to: return
-    try:
-        msg=MIMEMultipart(); msg["From"]=EMAIL_CONFIG["sender"]; msg["To"]=to; msg["Subject"]=subject
-        msg.attach(MIMEText(body,"html"))
-        with smtplib.SMTP(EMAIL_CONFIG["smtp_host"],EMAIL_CONFIG["smtp_port"]) as s:
-            s.starttls(); s.login(EMAIL_CONFIG["sender"],EMAIL_CONFIG["password"])
-            s.sendmail(EMAIL_CONFIG["sender"],to,msg.as_string())
-    except Exception as e: print(f"[Email] {e}")
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  NOTIFICATION TRIGGERS
-# ══════════════════════════════════════════════════════════════════════════════
 def _notify_approval(loan):
     name   = loan.get("customer_name","Customer")
     ln     = loan.get("loan_number","")
@@ -2174,6 +2172,17 @@ def api_sms_single():
     ok, info = _send_sms(mobile, msg)
     return jsonify({"ok": ok, "info": info, "sms_enabled": SMS_CONFIG["enabled"]})
 
+@app.route("/sms_test", methods=["POST"])
+@login_required
+@role_required("admin","manager")
+def sms_test():
+    """Test SMS to a specific number."""
+    data   = request.get_json() or {}
+    mobile = str(data.get("mobile","")).strip()
+    ok, info = _send_sms(mobile, f"Test SMS from Thendralla Fincorp. Your app SMS is working! -TFC")
+    return jsonify({"ok": ok, "info": info, "sms_enabled": SMS_CONFIG["enabled"],
+                    "api_key_set": bool(SMS_CONFIG["api_key"])})
+
 @app.route("/sms_settings")
 @login_required
 @role_required("admin")
@@ -2183,43 +2192,104 @@ def sms_settings():
     key_set = bool(SMS_CONFIG["api_key"])
     content = f"""
     <h1>📱 SMS Notification Settings</h1>
+
+    <!-- Status Card -->
     <div class="card" style="border-left:4px solid {'var(--green)' if enabled else 'var(--red)'};">
-      <h2>Status: {'✅ Active' if enabled else '❌ Not Configured'}</h2>
-      <p style="margin-top:8px;color:var(--muted);font-size:13px;">
-        {'SMS notifications are enabled and will be sent automatically.' if enabled else
-         'SMS is disabled. Set the FAST2SMS_KEY environment variable on Render to enable.'}
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div>
+          <h2>{'✅ SMS Active' if enabled else '❌ SMS Not Configured'}</h2>
+          <p style="color:var(--muted);font-size:13px;margin-top:4px;">
+            {'API Key is set. SMS will be sent automatically on loan events.' if enabled else
+             'Set FAST2SMS_KEY in app.py or Render environment to enable SMS.'}
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Test SMS Tool -->
+    <div class="card">
+      <h2>🧪 Test SMS</h2>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:12px;">
+        Enter any 10-digit mobile number to send a test SMS and verify your setup works.
       </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <input id="test_mobile" type="tel" placeholder="10-digit mobile number"
+               maxlength="10" style="max-width:220px;"
+               oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10)">
+        <button class="btn btn-primary" onclick="testSMS()">📤 Send Test SMS</button>
+      </div>
+      <div id="test_result" style="margin-top:12px;display:none;"></div>
     </div>
 
+    <!-- Setup Instructions -->
     <div class="card">
-      <h2>🔧 How to Enable SMS</h2>
-      <ol style="margin-left:20px;line-height:2;font-size:14px;color:var(--text);">
-        <li>Go to <a href="https://www.fast2sms.com" target="_blank" style="color:var(--accent);">
-            <b>fast2sms.com</b></a> → Sign Up (Free)</li>
-        <li>Go to <b>Dashboard → Dev API</b> → Copy your API Key</li>
-        <li>On <b>Render.com</b> → Your App → <b>Environment</b> → Add variable:<br>
-            <code style="background:#f1f5fb;padding:4px 8px;border-radius:4px;font-size:13px;">
-            FAST2SMS_KEY = your_api_key_here</code></li>
-        <li><b>Redeploy</b> the app — SMS will be active immediately</li>
-        <li>For DLT compliance (required for transactional SMS in India), register your
-            message template on Fast2SMS DLT panel</li>
+      <h2>🔧 How to Set Up SMS (Fast2SMS)</h2>
+      <ol style="margin-left:18px;line-height:2.2;font-size:14px;">
+        <li>Go to <a href="https://www.fast2sms.com" target="_blank" style="color:var(--accent);font-weight:700;">fast2sms.com</a>
+            → <b>Sign Up</b> (Free — get ₹50 credits instantly)</li>
+        <li>Login → <b>Dev API</b> (left menu) → Copy the <b>API Key</b></li>
+        <li>Open <b>app.py</b> → Find this line:<br>
+            <code style="background:#f1f5fb;padding:4px 8px;border-radius:4px;font-size:12px;display:inline-block;margin:4px 0;">
+            "api_key": os.environ.get("FAST2SMS_KEY", ""),</code><br>
+            Change to:<br>
+            <code style="background:#d1fae5;padding:4px 8px;border-radius:4px;font-size:12px;display:inline-block;margin:4px 0;">
+            "api_key": os.environ.get("FAST2SMS_KEY", "YOUR_COPIED_API_KEY"),</code>
+        </li>
+        <li>Save and <b>restart the app</b></li>
+        <li>Come back here → use <b>Test SMS</b> above to verify</li>
       </ol>
+      <div style="background:#fef3c7;border-radius:6px;padding:10px;margin-top:8px;font-size:13px;">
+        💡 <b>Route used:</b> Fast2SMS <code>v3</code> (Quick SMS — no DLT registration needed for testing).<br>
+        For production/bulk, upgrade to DLT route on Fast2SMS panel.
+      </div>
     </div>
 
+    <!-- SMS Events Table -->
     <div class="card">
-      <h2>📋 SMS Events</h2>
-      <table><tr><th>Event</th><th>When</th><th>Recipient</th></tr>
-        <tr><td>✅ Loan Approved</td><td>When admin approves a loan</td><td>Customer mobile</td></tr>
-        <tr><td>🔔 EMI Reminder</td><td>Click "Send Reminders" on Alerts page (≤3 days)</td><td>Customer mobile</td></tr>
-        <tr><td>🔴 Overdue Alert</td><td>Click "Send Overdue SMS" on Alerts page</td><td>Customer mobile</td></tr>
-        <tr><td>🎉 Loan Closed</td><td>When all EMIs are paid</td><td>Customer mobile</td></tr>
-      </table>
+      <h2>📋 Automatic SMS Events</h2>
+      <div class="table-wrap"><table>
+        <tr><th>Event</th><th>Triggered When</th><th>Recipient</th></tr>
+        <tr><td>✅ Loan Approved</td><td>Admin approves a loan</td><td>Customer mobile</td></tr>
+        <tr><td>🎉 Loan Closed</td><td>All EMIs are paid</td><td>Customer mobile</td></tr>
+        <tr><td>🔴 Overdue Alert</td><td>Click button on Alerts page</td><td>Overdue customers</td></tr>
+        <tr><td>🟡 EMI Reminder</td><td>Click button on Alerts page (≤3 days)</td><td>Upcoming customers</td></tr>
+      </table></div>
     </div>
 
-    <div class="card" style="background:#fef3c7;border-color:#fde68a;">
-      <b>💡 Fast2SMS Free Tier:</b> ₹50 free credits on signup (~100-150 SMS).
-      Recharge as needed. Very affordable for small finance companies.
-    </div>
+    <script>
+    function testSMS() {{
+      const mob = document.getElementById('test_mobile').value.trim();
+      const res = document.getElementById('test_result');
+      if (mob.length !== 10) {{
+        res.style.display='block';
+        res.innerHTML='<div class="alert alert-danger">❌ Enter a valid 10-digit mobile number.</div>';
+        return;
+      }}
+      res.style.display='block';
+      res.innerHTML='<div class="alert alert-info">⏳ Sending test SMS to ' + mob + '…</div>';
+      fetch('/sms_test', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{mobile: mob}})
+      }})
+      .then(r => r.json())
+      .then(data => {{
+        if (!data.api_key_set) {{
+          res.innerHTML='<div class="alert alert-danger">❌ API Key not set in app.py. See setup instructions below.</div>';
+          return;
+        }}
+        if (data.ok) {{
+          res.innerHTML='<div class="alert alert-success">✅ ' + data.info + '<br><b>Check the mobile for the SMS!</b></div>';
+        }} else {{
+          res.innerHTML='<div class="alert alert-danger">❌ Failed: ' + data.info +
+            '<br><small>Check: Is the API key correct? Does the number have DND? Is your Fast2SMS balance > 0?</small></div>';
+        }}
+      }})
+      .catch(e => {{
+        res.innerHTML='<div class="alert alert-danger">❌ Network error: ' + e.message + '</div>';
+      }});
+    }}
+    </script>
     """
     return page("SMS Settings", content, "")
 
