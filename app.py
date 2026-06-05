@@ -676,18 +676,21 @@ h2{font-size:17px;margin-bottom:12px;}
 /* ── FORMS ── */
 .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
 .form-grid.three{grid-template-columns:1fr 1fr 1fr;}
-.form-group{display:flex;flex-direction:column;gap:4px;}
+.form-group{display:flex;flex-direction:column;gap:5px;}
 .form-group.full{grid-column:1/-1;}
-label{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;}
+label{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;
+      letter-spacing:.3px;white-space:normal;line-height:1.3;}
 input,select,textarea{
-  padding:9px 10px;border:1px solid var(--border);border-radius:7px;
-  font-size:14px;background:#fff;color:var(--text);width:100%;transition:border-color .15s;
+  padding:11px 12px;border:1px solid var(--border);border-radius:8px;
+  font-size:15px;background:#fff;color:var(--text);width:100%;
+  transition:border-color .15s;box-sizing:border-box;
 }
-input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent2);}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent2);
+  box-shadow:0 0 0 3px rgba(29,111,219,.12);}
 input[readonly]{background:var(--surface2);color:var(--muted);}
 .section-title{font-size:12px;font-weight:700;color:var(--accent);text-transform:uppercase;
-               letter-spacing:.5px;padding:8px 0 4px;border-bottom:2px solid var(--accent);
-               margin-bottom:10px;grid-column:1/-1;margin-top:8px;}
+               letter-spacing:.5px;padding:10px 0 5px;border-bottom:2px solid var(--accent);
+               margin-bottom:12px;grid-column:1/-1;margin-top:10px;}
 
 /* ── BUTTONS ── */
 .btn{display:inline-flex;align-items:center;gap:5px;padding:9px 18px;border-radius:7px;
@@ -770,14 +773,63 @@ tr.row-paid td{opacity:.65;}
 
 /* ── MOBILE ── */
 @media(max-width:768px){
+  /* Sidebar */
   .sidebar{transform:translateX(-100%);}
   .sidebar.open{transform:translateX(0);}
   .sidebar-overlay.open{display:block;}
+
+  /* Topbar */
   .topbar{display:flex;}
-  .main-wrap{margin-left:0;padding:70px 12px 16px;}
-  .form-grid,.form-grid.three{grid-template-columns:1fr;}
-  .due-grid,.calc-summary,.chart-grid{grid-template-columns:1fr;}
-  .kpi-grid{grid-template-columns:repeat(2,1fr);}
+
+  /* Main wrap — full width, below topbar */
+  .main-wrap{margin-left:0 !important;padding:62px 10px 20px !important;
+             max-width:100% !important;width:100% !important;}
+
+  /* Page title */
+  h1{font-size:18px;margin-bottom:12px;}
+  h2{font-size:15px;}
+
+  /* Cards */
+  .card{padding:14px;border-radius:8px;}
+
+  /* Forms — single column on mobile */
+  .form-grid,
+  .form-grid.three{grid-template-columns:1fr !important;}
+  .form-group.full{grid-column:1 !important;}
+
+  /* Inputs bigger touch targets */
+  input,select,textarea{
+    font-size:16px !important;   /* prevents iOS zoom */
+    padding:12px 12px !important;
+    min-height:46px;
+  }
+  label{font-size:11px;margin-bottom:2px;}
+  .section-title{font-size:11px;}
+
+  /* Buttons */
+  .btn{padding:10px 16px;font-size:13px;}
+  .btn-sm{padding:8px 12px;font-size:12px;}
+
+  /* KPIs */
+  .kpi-grid{grid-template-columns:repeat(2,1fr);gap:8px;}
+  .kpi{padding:10px 12px;}
+  .kpi .val{font-size:20px;}
+
+  /* Due preview */
+  .due-grid{grid-template-columns:1fr 1fr !important;}
+  .due-item .val{font-size:14px;}
+
+  /* Charts */
+  .calc-summary,.chart-grid{grid-template-columns:1fr;}
+  .chart-box{max-height:none;}
+
+  /* Tables — horizontal scroll */
+  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:6px;}
+  table{font-size:12px;min-width:480px;}
+  th,td{padding:7px 6px;}
+
+  /* Alert messages */
+  .alert{font-size:12px;padding:8px 10px;}
 }
 </style>
 """
@@ -819,7 +871,7 @@ def page(title, content, active=""):
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>TFC — {title}</title>
@@ -920,7 +972,7 @@ def login():
         err = "Invalid credentials."
     logo_html = f"<img src='data:image/jpeg;base64,{LOGO_B64}' style='height:80px;margin-bottom:10px;'><br>" if LOGO_B64 else ""
     return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>TFC Login</title>{BASE_CSS}</head>
 <body style="background:linear-gradient(135deg,#1a4fad,#0ea5e9);display:flex;
              align-items:center;justify-content:center;min-height:100vh;">
@@ -1210,12 +1262,9 @@ def add_loan():
           <textarea name="customer_address" id="cust_address" rows="2" required></textarea>
         </div>
         <div class="form-group full">
-          <label>📍 GPS Location * <span style="font-size:10px;color:var(--muted);">(press button or enter manually)</span></label>
-          <div class="gps-row">
-            <input name="customer_location" id="cust_location" placeholder="e.g. 10.9876,78.1234 or area name" required>
-            <button type="button" class="btn btn-amber btn-sm" onclick="getGPS()" style="white-space:nowrap;">📡 Get GPS</button>
-          </div>
-          <small id="gps_status" style="color:var(--muted);font-size:11px;"></small>
+          <label>📍 Location <span style="font-size:10px;color:var(--muted);">(area name or coordinates — optional)</span></label>
+          <input name="customer_location" id="cust_location" placeholder="e.g. Anna Nagar, Trichy or 10.9876,78.1234">
+          <small style="color:var(--muted);font-size:11px;">Enter area name or lat,lng manually. GPS requires HTTPS and is not available on local network.</small>
         </div>
         <div class="form-group">
           <label>Email</label>
@@ -1303,9 +1352,6 @@ def add_loan():
     </div>
 
     <script>
-    function getGPS(){{
-      const st=document.getElementById('gps_status');
-      if(!navigator.geolocation){{ st.textContent='GPS not supported on this browser.'; return; }}
       st.textContent='📡 Getting location…';
       navigator.geolocation.getCurrentPosition(
         pos=>{{
