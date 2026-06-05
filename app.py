@@ -1262,9 +1262,19 @@ def add_loan():
           <textarea name="customer_address" id="cust_address" rows="2" required></textarea>
         </div>
         <div class="form-group full">
-          <label>📍 Location <span style="font-size:10px;color:var(--muted);">(area name or coordinates — optional)</span></label>
-          <input name="customer_location" id="cust_location" placeholder="e.g. Anna Nagar, Trichy or 10.9876,78.1234">
-          <small style="color:var(--muted);font-size:11px;">Enter area name or lat,lng manually. GPS requires HTTPS and is not available on local network.</small>
+          <label>📍 GPS Location <span style="font-size:10px;color:var(--muted);">(tap button or enter manually)</span></label>
+          <div style="display:flex;gap:8px;align-items:stretch;">
+            <input name="customer_location" id="cust_location"
+                   placeholder="e.g. 10.9876,78.1234 or area name"
+                   style="flex:1;">
+            <button type="button" onclick="getGPS()"
+                    style="background:var(--amber);color:#fff;border:none;border-radius:8px;
+                           padding:0 14px;font-size:13px;font-weight:700;cursor:pointer;
+                           white-space:nowrap;min-height:46px;flex-shrink:0;">
+              📡 Get GPS
+            </button>
+          </div>
+          <small id="gps_status" style="color:var(--muted);font-size:11px;margin-top:2px;"></small>
         </div>
         <div class="form-group">
           <label>Email</label>
@@ -1352,15 +1362,31 @@ def add_loan():
     </div>
 
     <script>
-      st.textContent='📡 Getting location…';
+    function getGPS(){{
+      const btn=document.querySelector('[onclick="getGPS()"]');
+      const st=document.getElementById('gps_status');
+      if(!navigator.geolocation){{
+        st.textContent='❌ GPS not supported on this browser.';
+        st.style.color='var(--red)'; return;
+      }}
+      btn.textContent='⏳ Getting…'; btn.disabled=true;
+      st.textContent='📡 Getting your location…';
+      st.style.color='var(--muted)';
       navigator.geolocation.getCurrentPosition(
         pos=>{{
           const coords=pos.coords.latitude.toFixed(6)+','+pos.coords.longitude.toFixed(6);
           document.getElementById('cust_location').value=coords;
           st.textContent='✅ Location captured: '+coords;
+          st.style.color='var(--green)';
+          btn.textContent='📡 Get GPS'; btn.disabled=false;
         }},
-        err=>{{st.textContent='❌ GPS error: '+err.message+' — enter manually.';}}
-      ,{{enableHighAccuracy:true,timeout:10000}});
+        err=>{{
+          st.textContent='❌ '+err.message+' — enter manually.';
+          st.style.color='var(--red)';
+          btn.textContent='📡 Get GPS'; btn.disabled=false;
+        }},
+        {{enableHighAccuracy:true,timeout:15000,maximumAge:0}}
+      );
     }}
     function toggleReloan(v){{
       document.getElementById('reloan_section').style.display=v==='yes'?'block':'none';
