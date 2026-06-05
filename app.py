@@ -821,7 +821,9 @@ tr.row-paid td{opacity:.65;}
 
   /* Charts */
   .calc-summary,.chart-grid{grid-template-columns:1fr;}
-  .chart-box{max-height:none;}
+  .chart-box{max-height:180px !important;padding:10px;}
+  .chart-box h3{font-size:11px;margin-bottom:6px;}
+  canvas{max-height:130px !important;}
 
   /* Tables — horizontal scroll */
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:6px;}
@@ -1041,17 +1043,17 @@ def dashboard():
     <div class="chart-grid">
       <div class="chart-box">
         <h3>📈 Monthly Collections</h3>
-        <canvas id="barChart" height="110"></canvas>
+        <canvas id="barChart" height="110" style="max-height:110px"></canvas>
       </div>
       <div class="chart-box">
         <h3>🍩 Loan Status</h3>
-        <canvas id="donutChart" height="110"></canvas>
+        <canvas id="donutChart" height="110" style="max-height:110px"></canvas>
       </div>
     </div>
     <div class="chart-grid" style="margin-top:0;">
       <div class="chart-box">
         <h3>🚗 Loans by Vehicle Type</h3>
-        <canvas id="typeChart" height="110"></canvas>
+        <canvas id="typeChart" height="110" style="max-height:110px"></canvas>
       </div>
       <div class="chart-box" style="display:flex;flex-direction:column;justify-content:center;">
         <h3>📊 Quick Stats</h3>
