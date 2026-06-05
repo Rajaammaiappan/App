@@ -47,6 +47,15 @@ EMAIL_CONFIG = {
     "enabled":   os.environ.get("SMTP_ENABLED", "false").lower() == "true",
 }
 
+# ── SMS CONFIG (Fast2SMS — India) ──────────────────────────────────────────────
+# Get free API key from https://www.fast2sms.com → Dashboard → Dev API
+# Set environment variable FAST2SMS_KEY=your_api_key on Render
+SMS_CONFIG = {
+    "api_key": os.environ.get("FAST2SMS_KEY", ""),   # Set this on Render
+    "enabled": bool(os.environ.get("FAST2SMS_KEY", "")),
+    "sender_id": "TFCORP",                            # 6-char sender ID (apply on Fast2SMS)
+}
+
 ROLES = {
     "admin":    {"label":"Admin",    "can_approve":True,  "can_reject":True,  "can_add":True,  "can_pay":True,  "can_report":True},
     "manager":  {"label":"Manager",  "can_approve":False, "can_reject":False, "can_add":True,  "can_pay":True,  "can_report":True},
@@ -525,6 +534,67 @@ def get_loan_type_breakdown():
     return [dict(r) for r in c.fetchall()]
 
 # ── Email ──────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+#  SMS via Fast2SMS (India)
+# ══════════════════════════════════════════════════════════════════════════════
+def _send_sms(mobile, message):
+    """Send SMS via Fast2SMS DLT route. Returns (success:bool, info:str)."""
+    if not SMS_CONFIG.get("enabled"):
+        return False, "SMS not configured (FAST2SMS_KEY not set)"
+    if not mobile or len(str(mobile).strip()) != 10:
+        return False, f"Invalid mobile: {mobile}"
+    try:
+        resp = http_req.post(
+            "https://www.fast2sms.com/dev/bulkV2",
+            headers={"authorization": SMS_CONFIG["api_key"]},
+            data={
+                "route":   "q",           # transactional route (DLT registered)
+                "message": message[:160], # max 160 chars per SMS
+                "language":"english",
+                "flash":   0,
+                "numbers": str(mobile).strip(),
+            },
+            timeout=10
+        )
+        result = resp.json()
+        if result.get("return"):
+            return True, f"SMS sent to {mobile}"
+        else:
+            return False, f"Fast2SMS error: {result.get('message','Unknown')}"
+    except Exception as e:
+        return False, f"SMS exception: {e}"
+
+def _send_sms_bulk(mobiles, message):
+    """Send same SMS to multiple 10-digit numbers."""
+    if not SMS_CONFIG.get("enabled"):
+        return False, "SMS not configured"
+    nums = [str(m).strip() for m in mobiles if m and len(str(m).strip())==10]
+    if not nums:
+        return False, "No valid numbers"
+    try:
+        resp = http_req.post(
+            "https://www.fast2sms.com/dev/bulkV2",
+            headers={"authorization": SMS_CONFIG["api_key"]},
+            data={
+                "route":   "q",
+                "message": message[:160],
+                "language":"english",
+                "flash":   0,
+                "numbers": ",".join(nums),
+            },
+            timeout=10
+        )
+        result = resp.json()
+        if result.get("return"):
+            return True, f"SMS sent to {len(nums)} number(s)"
+        else:
+            return False, f"Fast2SMS error: {result.get('message','Unknown')}"
+    except Exception as e:
+        return False, f"SMS exception: {e}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  EMAIL
+# ══════════════════════════════════════════════════════════════════════════════
 def _send_email(to,subject,body):
     if not EMAIL_CONFIG.get("enabled") or not to: return
     try:
@@ -535,20 +605,100 @@ def _send_email(to,subject,body):
             s.sendmail(EMAIL_CONFIG["sender"],to,msg.as_string())
     except Exception as e: print(f"[Email] {e}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  NOTIFICATION TRIGGERS
+# ══════════════════════════════════════════════════════════════════════════════
 def _notify_approval(loan):
-    em=loan.get("customer_email","")
-    if not em: return
-    _send_email(em,"Your Vehicle Loan Has Been Approved",
-        f"<h2>Loan Approved</h2><p>Dear {loan['customer_name']},</p>"
-        f"<p>Loan <b>{loan['loan_number']}</b> of {fmt_inr(loan['loan_amount'])} approved.</p>")
+    name   = loan.get("customer_name","Customer")
+    ln     = loan.get("loan_number","")
+    amt    = fmt_inr(loan.get("loan_amount",0))
+    mobile = loan.get("customer_mobile","")
+    msg = (f"Dear {name}, Your loan {ln} of {amt} has been APPROVED by "
+           f"Thendralla Fincorp. Thank you for choosing us.")
+    _send_sms(mobile, msg)
+    em = loan.get("customer_email","")
+    if em:
+        _send_email(em,"Your Vehicle Loan Has Been Approved",
+            f"<h2>Loan Approved</h2><p>Dear {name},</p>"
+            f"<p>Loan <b>{ln}</b> of {amt} has been approved.</p>")
 
 def _notify_closure(loan_id):
     c=get_cur(); c.execute("SELECT * FROM LoanEntry WHERE id=?",(loan_id,))
     loan=c.fetchone()
-    if not loan or not loan["customer_email"]: return
-    _send_email(loan["customer_email"],"Loan Fully Repaid — Congratulations!",
-        f"<h2>Loan Closed</h2><p>Dear {loan['customer_name']},</p>"
-        f"<p>All EMIs for loan <b>{loan['loan_number']}</b> have been paid. Loan is now closed!</p>")
+    if not loan: return
+    name   = loan["customer_name"]
+    ln     = loan["loan_number"]
+    mobile = loan.get("customer_mobile","")
+    msg = (f"Dear {name}, Congratulations! All EMIs for loan {ln} are PAID. "
+           f"Loan is now CLOSED. Thank you - Thendralla Fincorp.")
+    _send_sms(mobile, msg)
+    if loan.get("customer_email"):
+        _send_email(loan["customer_email"],"Loan Fully Repaid — Congratulations!",
+            f"<h2>Loan Closed</h2><p>Dear {name},</p>"
+            f"<p>All EMIs for loan <b>{ln}</b> paid. Loan is now closed!</p>")
+
+def _notify_emi_due(loan_number, customer_name, mobile, due_date, amount, days_left):
+    """Upcoming EMI reminder SMS."""
+    if days_left <= 0:
+        msg = (f"Dear {customer_name}, EMI of {fmt_inr(amount)} for loan {loan_number} "
+               f"was DUE on {due_date}. Please pay immediately. -Thendralla Fincorp")
+    else:
+        msg = (f"Dear {customer_name}, Reminder: EMI of {fmt_inr(amount)} for loan "
+               f"{loan_number} is DUE on {due_date} ({days_left} days). -Thendralla Fincorp")
+    return _send_sms(mobile, msg)
+
+def send_bulk_overdue_sms():
+    """Send SMS to all overdue loan customers. Called from Alerts page."""
+    overdue = get_overdue_emis()
+    # Group by loan number to avoid duplicate SMS
+    seen = set(); results = []; total_sent = 0
+    for e in overdue:
+        ln = e["loan_number"]
+        if ln in seen: continue
+        seen.add(ln)
+        c = get_cur()
+        c.execute("SELECT customer_name,customer_mobile,loan_number FROM LoanEntry WHERE loan_number=?", (ln,))
+        row = c.fetchone()
+        if not row: continue
+        name   = row["customer_name"]
+        mobile = row.get("customer_mobile","")
+        due_d  = parse_date(e["due_date"])
+        days   = (date.today() - due_d).days
+        amt    = sum(float(x.get("remaining_amount") or x["emi_amount"])
+                     for x in overdue if x["loan_number"]==ln)
+        msg = (f"Dear {name}, URGENT: Total overdue EMI of {fmt_inr(amt)} for loan "
+               f"{ln} is pending {days} day(s). Pay now to avoid penalty. -Thendralla Fincorp")
+        ok, info = _send_sms(mobile, msg)
+        results.append({"loan":ln,"name":name,"mobile":mobile,"ok":ok,"info":info})
+        if ok: total_sent += 1
+    return results, total_sent
+
+def send_bulk_upcoming_sms():
+    """Send SMS to customers with EMIs due in 3 days."""
+    upcoming = get_upcoming_emis()
+    seen = set(); results = []; total_sent = 0
+    today = date.today()
+    for e in upcoming:
+        ln = e["loan_number"]
+        if ln in seen: continue
+        due_d = parse_date(e["due_date"])
+        days_left = (due_d - today).days
+        if days_left > 3: continue   # only send if ≤3 days away
+        seen.add(ln)
+        c = get_cur()
+        c.execute("SELECT customer_name,customer_mobile FROM LoanEntry WHERE loan_number=?", (ln,))
+        row = c.fetchone()
+        if not row: continue
+        name   = row["customer_name"]
+        mobile = row.get("customer_mobile","")
+        amt    = sum(float(x.get("remaining_amount") or x["emi_amount"])
+                     for x in upcoming if x["loan_number"]==ln)
+        msg = (f"Dear {name}, Reminder: EMI of {fmt_inr(amt)} for loan {ln} is due "
+               f"on {e['due_date']} ({days_left} day(s)). -Thendralla Fincorp")
+        ok, info = _send_sms(mobile, msg)
+        results.append({"loan":ln,"name":name,"mobile":mobile,"ok":ok,"info":info})
+        if ok: total_sent += 1
+    return results, total_sent
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PDF
@@ -856,6 +1006,7 @@ def _nav_links(role, active):
     links += lnk("/calculator","🧮","Calculator","calculator")
     if can_report:  links += lnk("/report","📊","Report","report")
     if role=="admin": links += lnk("/users","⚙️","Users","users")
+    if role=="admin": links += lnk("/sms_settings","📱","SMS Setup","sms")
     return links
 
 def page(title, content, active=""):
@@ -1692,8 +1843,31 @@ def alerts():
           <td><a class="btn btn-sm btn-amber" href="/emis/{g['lid']}">📋 View</a></td>
         </tr>"""
 
+    sms_on = SMS_CONFIG["enabled"]
+    sms_badge = ('<span style="background:#059669;color:#fff;font-size:11px;padding:2px 8px;'
+                 'border-radius:10px;margin-left:8px;">📱 SMS ON</span>' if sms_on else
+                 '<span style="background:#6b7280;color:#fff;font-size:11px;padding:2px 8px;'
+                 'border-radius:10px;margin-left:8px;">📱 SMS OFF</span>')
+
     content = f"""
-    <h1>🔔 Alerts</h1>
+    <h1>🔔 Alerts {sms_badge}</h1>
+
+    <!-- SMS Action Buttons -->
+    <div class="card" style="padding:14px;margin-bottom:14px;">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+        <b style="font-size:14px;">📱 Send SMS Notifications:</b>
+        <button class="btn btn-danger btn-sm" onclick="sendSMS('overdue')" id="btn_overdue">
+          🔴 Alert Overdue Customers
+        </button>
+        <button class="btn btn-amber btn-sm" onclick="sendSMS('upcoming')" id="btn_upcoming">
+          🟡 Remind Due in 3 Days
+        </button>
+        {"<a href='/sms_settings' class='btn btn-sm' style='background:var(--surface2);color:var(--text);'>⚙️ SMS Setup</a>" if session.get("role")=="admin" else ""}
+      </div>
+      {"<p style='font-size:12px;color:#92400e;margin-top:8px;background:#fef3c7;padding:6px 10px;border-radius:5px;'>⚠️ SMS not configured. <a href='/sms_settings' style='color:var(--accent);'>Click here to set up</a> — it takes 2 minutes.</p>" if not sms_on else ""}
+      <div id="sms_result" style="margin-top:10px;display:none;"></div>
+    </div>
+
     <div class="card">
       <h2 style="color:var(--red);">🔴 Overdue — {len(od_grouped)} Loan(s) &nbsp;
         <small style="font-size:13px;color:var(--muted);">Total: ₹{sum(g['total_due'] for g in od_grouped):,.2f}</small></h2>
@@ -1718,6 +1892,44 @@ def alerts():
         {up_rows or '<tr><td colspan="7" style="color:var(--green);text-align:center;background:#d1fae5;">✅ No upcoming EMIs in 10 days.</td></tr>'}
       </table></div>
     </div>"""
+    content += """
+    <script>
+    function sendSMS(type) {
+      const btn = document.getElementById('btn_' + type);
+      const res = document.getElementById('sms_result');
+      btn.disabled = true;
+      btn.textContent = '⏳ Sending…';
+      res.style.display = 'none';
+      fetch('/api/sms/' + type, {method:'POST',headers:{'Content-Type':'application/json'}})
+        .then(r => r.json())
+        .then(data => {
+          btn.disabled = false;
+          btn.textContent = type === 'overdue' ? '🔴 Alert Overdue Customers' : '🟡 Remind Due in 3 Days';
+          res.style.display = 'block';
+          if (!data.sms_enabled) {
+            res.innerHTML = '<div class="alert alert-warning">⚠️ SMS not configured. <a href="/sms_settings">Set up Fast2SMS</a> to enable.</div>';
+            return;
+          }
+          let html = '<div class="alert alert-' + (data.sent > 0 ? 'success' : 'info') + '">';
+          html += '📱 SMS sent to <b>' + data.sent + '</b> of ' + data.total + ' customer(s).</div>';
+          if (data.results && data.results.length > 0) {
+            html += '<div style="font-size:12px;margin-top:6px;">';
+            data.results.forEach(r => {
+              html += '<span style="margin-right:12px;">' +
+                (r.ok ? '✅' : '❌') + ' ' + r.loan + ' (' + r.mobile + ')</span>';
+            });
+            html += '</div>';
+          }
+          res.innerHTML = html;
+        })
+        .catch(e => {
+          btn.disabled = false;
+          res.style.display = 'block';
+          res.innerHTML = '<div class="alert alert-danger">❌ Error: ' + e.message + '</div>';
+        });
+    }
+    </script>
+    """
     return page("Alerts", content, "alerts")
 
 # ── Closed / Rejected ──────────────────────────────────────────────────────────
@@ -1931,6 +2143,85 @@ def api_monthly():
 def api_breakdown():
     bd = get_loan_type_breakdown()
     return jsonify({"labels":[r["vehicle_type"] for r in bd],"data":[r["cnt"] for r in bd]})
+
+# ── SMS Alert APIs ─────────────────────────────────────────────────────────────
+@app.route("/api/sms/overdue", methods=["POST"])
+@login_required
+@role_required("admin","manager")
+def api_sms_overdue():
+    results, total = send_bulk_overdue_sms()
+    return jsonify({"sent": total, "total": len(results), "results": results,
+                    "sms_enabled": SMS_CONFIG["enabled"]})
+
+@app.route("/api/sms/upcoming", methods=["POST"])
+@login_required
+@role_required("admin","manager")
+def api_sms_upcoming():
+    results, total = send_bulk_upcoming_sms()
+    return jsonify({"sent": total, "total": len(results), "results": results,
+                    "sms_enabled": SMS_CONFIG["enabled"]})
+
+@app.route("/api/sms/single", methods=["POST"])
+@login_required
+@role_required("admin","manager")
+def api_sms_single():
+    """Send a custom SMS to one customer mobile number."""
+    data   = request.get_json()
+    mobile = data.get("mobile","").strip()
+    msg    = data.get("message","").strip()
+    if not mobile or not msg:
+        return jsonify({"ok": False, "info": "Mobile and message required"})
+    ok, info = _send_sms(mobile, msg)
+    return jsonify({"ok": ok, "info": info, "sms_enabled": SMS_CONFIG["enabled"]})
+
+@app.route("/sms_settings")
+@login_required
+@role_required("admin")
+def sms_settings():
+    """SMS configuration status page."""
+    enabled = SMS_CONFIG["enabled"]
+    key_set = bool(SMS_CONFIG["api_key"])
+    content = f"""
+    <h1>📱 SMS Notification Settings</h1>
+    <div class="card" style="border-left:4px solid {'var(--green)' if enabled else 'var(--red)'};">
+      <h2>Status: {'✅ Active' if enabled else '❌ Not Configured'}</h2>
+      <p style="margin-top:8px;color:var(--muted);font-size:13px;">
+        {'SMS notifications are enabled and will be sent automatically.' if enabled else
+         'SMS is disabled. Set the FAST2SMS_KEY environment variable on Render to enable.'}
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>🔧 How to Enable SMS</h2>
+      <ol style="margin-left:20px;line-height:2;font-size:14px;color:var(--text);">
+        <li>Go to <a href="https://www.fast2sms.com" target="_blank" style="color:var(--accent);">
+            <b>fast2sms.com</b></a> → Sign Up (Free)</li>
+        <li>Go to <b>Dashboard → Dev API</b> → Copy your API Key</li>
+        <li>On <b>Render.com</b> → Your App → <b>Environment</b> → Add variable:<br>
+            <code style="background:#f1f5fb;padding:4px 8px;border-radius:4px;font-size:13px;">
+            FAST2SMS_KEY = your_api_key_here</code></li>
+        <li><b>Redeploy</b> the app — SMS will be active immediately</li>
+        <li>For DLT compliance (required for transactional SMS in India), register your
+            message template on Fast2SMS DLT panel</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>📋 SMS Events</h2>
+      <table><tr><th>Event</th><th>When</th><th>Recipient</th></tr>
+        <tr><td>✅ Loan Approved</td><td>When admin approves a loan</td><td>Customer mobile</td></tr>
+        <tr><td>🔔 EMI Reminder</td><td>Click "Send Reminders" on Alerts page (≤3 days)</td><td>Customer mobile</td></tr>
+        <tr><td>🔴 Overdue Alert</td><td>Click "Send Overdue SMS" on Alerts page</td><td>Customer mobile</td></tr>
+        <tr><td>🎉 Loan Closed</td><td>When all EMIs are paid</td><td>Customer mobile</td></tr>
+      </table>
+    </div>
+
+    <div class="card" style="background:#fef3c7;border-color:#fde68a;">
+      <b>💡 Fast2SMS Free Tier:</b> ₹50 free credits on signup (~100-150 SMS).
+      Recharge as needed. Very affordable for small finance companies.
+    </div>
+    """
+    return page("SMS Settings", content, "")
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
