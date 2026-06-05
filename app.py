@@ -51,7 +51,7 @@ EMAIL_CONFIG = {
 # Get free API key from https://www.fast2sms.com → Dashboard → Dev API
 # Set environment variable FAST2SMS_KEY=your_api_key on Render
 SMS_CONFIG = {
-    "api_key": os.environ.get("FAST2SMS_KEY", ""),   # Set this on Render
+    "api_key": os.environ.get("FAST2SMS_KEY", "Uv2IV4r5B6dxySCeGlasKmh13oJ7YRHAZEMjXFztuDLnNf9PcTiNBGM3dyv7IaeWbox4LTmAKSYDwXkr"),   # Set this on Render
     "enabled": bool(os.environ.get("FAST2SMS_KEY", "")),
     "sender_id": "TFCORP",                            # 6-char sender ID (apply on Fast2SMS)
 }
