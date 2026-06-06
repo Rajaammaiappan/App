@@ -11,14 +11,15 @@ Changes v3:
   - All previous features preserved
 """
 
-import os, math, sqlite3, hashlib, secrets, calendar, smtplib, base64
+import os, math, sqlite3, hashlib, secrets, calendar, smtplib, base64, io, zipfile, csv
 import requests as http_req
 from datetime import date, datetime, timezone, timedelta
 from functools import wraps
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import (Flask, request, redirect, url_for, session,
-                   flash, send_file, jsonify, g, get_flashed_messages)
+                   flash, send_file, jsonify, g, get_flashed_messages, Response)
+from werkzeug.utils import secure_filename
 
 try:
     from reportlab.lib.pagesizes import A4
@@ -35,6 +36,12 @@ except ImportError:
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 DB_FILE       = os.environ.get("DB_FILE", "vehicle_loans.db")
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", "uploads")
+ALLOWED_EXT   = {"pdf","png","jpg","jpeg","doc","docx","xls","xlsx"}
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+def allowed_file(fn):
+    return "." in fn and fn.rsplit(".",1)[1].lower() in ALLOWED_EXT
 TURSO_URL     = os.environ.get("TURSO_URL", "")
 TURSO_TOKEN   = os.environ.get("TURSO_TOKEN", "")
 UPCOMING_DAYS = 10
@@ -51,7 +58,7 @@ EMAIL_CONFIG = {
 # Get free API key from https://www.fast2sms.com → Dashboard → Dev API
 # Set environment variable FAST2SMS_KEY=your_api_key on Render
 # ── Paste your Fast2SMS API key between the quotes below ──────────────────────
-FAST2SMS_HARDCODED_KEY = "LfFIRMIxB3MKJQR3wKzY5QZQIWmUTAULcaP1uh0dDHqCzVf5oxYS7Ba18Zn9"   # <-- paste key here if not using environment variable
+FAST2SMS_HARDCODED_KEY = ""   # <-- paste key here if not using environment variable
 
 def _get_sms_key():
     """Returns API key from environment or hardcoded fallback."""
@@ -327,6 +334,8 @@ def init_db():
         "ALTER TABLE LoanEntry ADD COLUMN is_reloan INTEGER DEFAULT 0",
         "ALTER TABLE LoanEntry ADD COLUMN reloan_ref TEXT",
         "ALTER TABLE EMI ADD COLUMN bill_number TEXT",
+        "ALTER TABLE LoanEntry ADD COLUMN remarks TEXT",
+        "ALTER TABLE LoanEntry ADD COLUMN attachment_path TEXT",
     ]:
         try: cur.execute(m)
         except: pass
@@ -354,7 +363,8 @@ def can_pay_emi(loan_id, inst_no):
 def create_loan(ln, cname, cmobile, caddr, cloc,
                 vtype, vnum, vmodel, eng, chas, vcol,
                 amt, rate_raw, tenure, sdate, cemail="",
-                gname="", gaddr="", gmob="", is_reloan=0, reloan_ref=""):
+                gname="", gaddr="", gmob="", is_reloan=0, reloan_ref="",
+                remarks="", attachment_path=""):
     r = normalize_interest(rate_raw)
     if r is None: raise ValueError("Invalid interest rate")
     c = get_cur()
@@ -363,13 +373,14 @@ def create_loan(ln, cname, cmobile, caddr, cloc,
                   vehicle_type,vehicle_number,vehicle_model,engine_number,chassis_number,vehicle_colour,
                   loan_amount,interest_rate,tenure,start_date,status,created_at,
                   attachment,customer_email,guarantor_name,guarantor_address,guarantor_mobile,
-                  is_reloan,reloan_ref)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  is_reloan,reloan_ref,remarks,attachment_path)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (ln,cname,cmobile,caddr,cloc,
                vtype,vnum,vmodel,eng,chas,vcol,
                float(amt),float(r),int(tenure),sdate,"PendingApproval",
                datetime.now(timezone.utc).isoformat(),
-               None,cemail,gname,gaddr,gmob,int(is_reloan),reloan_ref))
+               None,cemail,gname,gaddr,gmob,int(is_reloan),reloan_ref,
+               remarks,attachment_path))
     get_db().commit(); return c.lastrowid
 
 def approve_loan(loan_id):
@@ -1015,7 +1026,7 @@ def _nav_links(role, active):
     links += lnk("/calculator","🧮","Calculator","calculator")
     if can_report:  links += lnk("/report","📊","Report","report")
     if role=="admin": links += lnk("/users","⚙️","Users","users")
-    if role=="admin": links += lnk("/sms_settings","📱","SMS Setup","sms")
+    if role=="admin": links += lnk("/dbmanager","🗄️","DB Manager","dbmanager")
     return links
 
 def page(title, content, active=""):
@@ -1355,6 +1366,14 @@ def add_loan():
         if not f.get("customer_address","").strip():
             flash("Customer address is mandatory.","danger")
             return redirect(url_for("add_loan"))
+        # Handle file upload
+        attachment_path = ""
+        file = request.files.get("attachment")
+        if file and file.filename and allowed_file(file.filename):
+            fn = secure_filename(f"{f['loan_number']}_{file.filename}")
+            fpath = os.path.join(UPLOAD_FOLDER, fn)
+            file.save(fpath)
+            attachment_path = fpath
         try:
             create_loan(
                 f["loan_number"], f["customer_name"], mob,
@@ -1364,7 +1383,8 @@ def add_loan():
                 f["loan_amount"], f["interest_rate"], f["tenure"], f["start_date"],
                 f.get("customer_email",""),
                 f.get("guarantor_name",""), f.get("guarantor_address",""), f.get("guarantor_mobile",""),
-                1 if f.get("is_reloan")=="yes" else 0, f.get("reloan_ref","")
+                1 if f.get("is_reloan")=="yes" else 0, f.get("reloan_ref",""),
+                f.get("remarks",""), attachment_path
             )
             flash("Loan submitted for approval.","success")
             return redirect(url_for("loans"))
@@ -1377,7 +1397,7 @@ def add_loan():
     content = f"""
     <h1>➕ New Loan Application</h1>
     <div class="card">
-    <form method="POST" id="loanForm">
+    <form method="POST" id="loanForm" enctype="multipart/form-data">
       <div class="form-grid">
 
         <div class="section-title">📄 Loan Details</div>
@@ -1500,6 +1520,18 @@ def add_loan():
         <div class="form-group full">
           <label>Guarantor Address</label>
           <textarea name="guarantor_address" rows="2"></textarea>
+        </div>
+
+        <div class="section-title">📎 Documents & Remarks</div>
+        <div class="form-group full">
+          <label>Attachment <span style="font-size:10px;color:var(--muted);">(PDF, Image, Word, Excel — optional)</span></label>
+          <input type="file" name="attachment" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx"
+                 style="padding:8px;cursor:pointer;">
+          <small style="color:var(--muted);font-size:11px;">Max file size: 10MB. Supported: PDF, JPG, PNG, DOC, XLS</small>
+        </div>
+        <div class="form-group full">
+          <label>Remarks <span style="font-size:10px;color:var(--muted);">(optional — any notes about this loan)</span></label>
+          <textarea name="remarks" rows="3" placeholder="e.g. Customer verified, documents checked..."></textarea>
         </div>
       </div>
 
@@ -1852,30 +1884,8 @@ def alerts():
           <td><a class="btn btn-sm btn-amber" href="/emis/{g['lid']}">📋 View</a></td>
         </tr>"""
 
-    sms_on = _sms_enabled()
-    sms_badge = ('<span style="background:#059669;color:#fff;font-size:11px;padding:2px 8px;'
-                 'border-radius:10px;margin-left:8px;">📱 SMS ON</span>' if sms_on else
-                 '<span style="background:#6b7280;color:#fff;font-size:11px;padding:2px 8px;'
-                 'border-radius:10px;margin-left:8px;">📱 SMS OFF</span>')
-
     content = f"""
-    <h1>🔔 Alerts {sms_badge}</h1>
-
-    <!-- SMS Action Buttons -->
-    <div class="card" style="padding:14px;margin-bottom:14px;">
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
-        <b style="font-size:14px;">📱 Send SMS Notifications:</b>
-        <button class="btn btn-danger btn-sm" onclick="sendSMS('overdue')" id="btn_overdue">
-          🔴 Alert Overdue Customers
-        </button>
-        <button class="btn btn-amber btn-sm" onclick="sendSMS('upcoming')" id="btn_upcoming">
-          🟡 Remind Due in 3 Days
-        </button>
-        {"<a href='/sms_settings' class='btn btn-sm' style='background:var(--surface2);color:var(--text);'>⚙️ SMS Setup</a>" if session.get("role")=="admin" else ""}
-      </div>
-      {"<p style='font-size:12px;color:#92400e;margin-top:8px;background:#fef3c7;padding:6px 10px;border-radius:5px;'>⚠️ SMS not configured. <a href='/sms_settings' style='color:var(--accent);'>Click here to set up</a> — it takes 2 minutes.</p>" if not sms_on else ""}
-      <div id="sms_result" style="margin-top:10px;display:none;"></div>
-    </div>
+    <h1>🔔 Alerts</h1>
 
     <div class="card">
       <h2 style="color:var(--red);">🔴 Overdue — {len(od_grouped)} Loan(s) &nbsp;
@@ -1901,44 +1911,6 @@ def alerts():
         {up_rows or '<tr><td colspan="7" style="color:var(--green);text-align:center;background:#d1fae5;">✅ No upcoming EMIs in 10 days.</td></tr>'}
       </table></div>
     </div>"""
-    content += """
-    <script>
-    function sendSMS(type) {
-      const btn = document.getElementById('btn_' + type);
-      const res = document.getElementById('sms_result');
-      btn.disabled = true;
-      btn.textContent = '⏳ Sending…';
-      res.style.display = 'none';
-      fetch('/api/sms/' + type, {method:'POST',headers:{'Content-Type':'application/json'}})
-        .then(r => r.json())
-        .then(data => {
-          btn.disabled = false;
-          btn.textContent = type === 'overdue' ? '🔴 Alert Overdue Customers' : '🟡 Remind Due in 3 Days';
-          res.style.display = 'block';
-          if (!data.sms_enabled) {
-            res.innerHTML = '<div class="alert alert-warning">⚠️ SMS not configured. <a href="/sms_settings">Set up Fast2SMS</a> to enable.</div>';
-            return;
-          }
-          let html = '<div class="alert alert-' + (data.sent > 0 ? 'success' : 'info') + '">';
-          html += '📱 SMS sent to <b>' + data.sent + '</b> of ' + data.total + ' customer(s).</div>';
-          if (data.results && data.results.length > 0) {
-            html += '<div style="font-size:12px;margin-top:6px;">';
-            data.results.forEach(r => {
-              html += '<span style="margin-right:12px;">' +
-                (r.ok ? '✅' : '❌') + ' ' + r.loan + ' (' + r.mobile + ')</span>';
-            });
-            html += '</div>';
-          }
-          res.innerHTML = html;
-        })
-        .catch(e => {
-          btn.disabled = false;
-          res.style.display = 'block';
-          res.innerHTML = '<div class="alert alert-danger">❌ Error: ' + e.message + '</div>';
-        });
-    }
-    </script>
-    """
     return page("Alerts", content, "alerts")
 
 # ── Closed / Rejected ──────────────────────────────────────────────────────────
@@ -2303,6 +2275,424 @@ def sms_settings():
     </script>
     """
     return page("SMS Settings", content, "")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATABASE MANAGER (Admin only)
+# ══════════════════════════════════════════════════════════════════════════════
+TABLES = ["LoanEntry","Customers","EMI","RejectedLoans","ClosedLoans","Users"]
+
+def _row_val(row, key_str, key_int):
+    """Safely get value from sqlite3.Row or dict by name or index."""
+    try:
+        if isinstance(row, dict):
+            return row.get(key_str)
+        return row[key_str]   # sqlite3.Row supports name access
+    except Exception:
+        try:
+            return row[key_int]
+        except Exception:
+            return None
+
+def db_get_tables():
+    """Return list of table names in the database."""
+    try:
+        # Use raw sqlite3 for reliability
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = [row["name"] for row in cur.fetchall()]
+        conn.close()
+        return tables
+    except Exception:
+        return TABLES
+
+def db_get_columns(table):
+    """Return list of column dicts {name, type} for a table."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cur = conn.cursor()
+        cur.execute(f"PRAGMA table_info([{table}])")
+        cols = [{"cid": row[0], "name": row[1], "type": row[2]} for row in cur.fetchall()]
+        conn.close()
+        return cols
+    except Exception as e:
+        print(f"[db_get_columns] {e}")
+        return []
+
+def db_get_rows(table, search="", page=1, per_page=30):
+    """Return (rows_list, total_count, col_names) for a table."""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cols_info = db_get_columns(table)
+        cols = [c["name"] for c in cols_info]
+        offset = (page - 1) * per_page
+
+        if search and cols:
+            like = f"%{search}%"
+            search_cols = cols[:5]   # search first 5 columns
+            where = " OR ".join([f"CAST([{col}] AS TEXT) LIKE ?" for col in search_cols])
+            params = [like] * len(search_cols)
+            cur.execute(f"SELECT * FROM [{table}] WHERE {where} LIMIT ? OFFSET ?",
+                        params + [per_page, offset])
+            rows = [dict(row) for row in cur.fetchall()]
+            cur.execute(f"SELECT COUNT(*) FROM [{table}] WHERE {where}", params)
+            total = cur.fetchone()[0] or 0
+        else:
+            cur.execute(f"SELECT * FROM [{table}] LIMIT ? OFFSET ?", (per_page, offset))
+            rows = [dict(row) for row in cur.fetchall()]
+            cur.execute(f"SELECT COUNT(*) FROM [{table}]")
+            total = cur.fetchone()[0] or 0
+
+        conn.close()
+        return rows, total, cols
+    except Exception as e:
+        print(f"[db_get_rows] {e}")
+        return [], 0, []
+
+def db_delete_row(table, pk_col, pk_val):
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute(f"DELETE FROM [{table}] WHERE [{pk_col}]=?", (pk_val,))
+    conn.commit(); conn.close()
+
+def db_update_row(table, pk_col, pk_val, data):
+    if not data: return
+    conn = sqlite3.connect(DB_FILE)
+    sets = ", ".join([f"[{k}]=?" for k in data.keys()])
+    vals = list(data.values()) + [pk_val]
+    conn.execute(f"UPDATE [{table}] SET {sets} WHERE [{pk_col}]=?", vals)
+    conn.commit(); conn.close()
+
+def db_delete_row(table, pk_col, pk_val):
+    c = get_cur()
+    c.execute(f"DELETE FROM {table} WHERE {pk_col}=?", (pk_val,))
+    get_db().commit()
+
+def db_update_row(table, pk_col, pk_val, data):
+    if not data: return
+    sets = ", ".join([f"{k}=?" for k in data.keys()])
+    vals = list(data.values()) + [pk_val]
+    c = get_cur()
+    c.execute(f"UPDATE {table} SET {sets} WHERE {pk_col}=?", vals)
+    get_db().commit()
+
+PK_MAP = {
+    "LoanEntry":"id","Customers":"customer_id","EMI":"emi_id",
+    "RejectedLoans":"reject_id","ClosedLoans":"close_id","Users":"user_id"
+}
+
+@app.route("/dbmanager")
+@login_required
+@role_required("admin")
+def dbmanager():
+    table   = request.args.get("table","LoanEntry")
+    search  = request.args.get("q","")
+    page    = int(request.args.get("page",1))
+    if table not in TABLES: table = "LoanEntry"
+    rows, total, cols = db_get_rows(table, search, page)
+    pages   = max(1,(total+29)//30)
+    pk_col  = PK_MAP.get(table,"id")
+
+    # Table tabs
+    tab_links = ""
+    for t in TABLES:
+        active_cls = 'style="background:var(--accent);color:#fff;"' if t==table else 'style="background:var(--surface2);color:var(--text);"'
+        tab_links += f'<a href="/dbmanager?table={t}" class="btn btn-sm" {active_cls}>{t}</a> '
+
+    # Column headers
+    th = "".join(f"<th>{c}</th>" for c in cols) + "<th>Actions</th>"
+
+    # Rows
+    tr_html = ""
+    for row in rows:
+        pk_val = row.get(pk_col,"")
+        cells = "".join(
+            f'<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{str(row.get(c,"")).replace(chr(34),chr(39))}">{str(row.get(c,"") or "")[:60]}</td>'
+            for c in cols
+        )
+        tr_html += f"""<tr id="row_{pk_val}">
+          {cells}
+          <td style="white-space:nowrap;">
+            <button class="btn btn-sm btn-primary" onclick="editRow('{table}','{pk_col}','{pk_val}',{list(row.values())})">✏️</button>
+            <button class="btn btn-sm btn-danger"  onclick="delRow('{table}','{pk_col}','{pk_val}')">🗑️</button>
+          </td>
+        </tr>"""
+
+    # Pagination
+    pag = ""
+    for p in range(max(1,page-2), min(pages,page+2)+1):
+        active = "btn-primary" if p==page else ""
+        pag += f'<a href="/dbmanager?table={table}&q={search}&page={p}" class="btn btn-sm {active}" style="{"" if active else "background:var(--surface2);color:var(--text);"}">{p}</a> '
+
+    content = f"""
+    <h1>🗄️ Database Manager</h1>
+    <div class="card" style="padding:12px;margin-bottom:12px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <b style="font-size:13px;">Table:</b>
+        {tab_links}
+      </div>
+    </div>
+
+    <div class="card">
+      <!-- Toolbar -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+        <form method="GET" style="display:flex;gap:6px;flex:1;min-width:200px;">
+          <input type="hidden" name="table" value="{table}">
+          <input name="q" value="{search}" placeholder="Search…" style="max-width:220px;">
+          <button class="btn btn-primary btn-sm">Search</button>
+        </form>
+        <a href="/dbmanager/download_csv?table={table}&q={search}" class="btn btn-sm btn-success">📥 CSV</a>
+        <a href="/dbmanager/download_zip" class="btn btn-sm btn-amber">📦 Full ZIP</a>
+        <button class="btn btn-sm" style="background:#6366f1;color:#fff;"
+                onclick="showAddRow('{table}')">➕ Add Row</button>
+      </div>
+
+      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">
+        Showing {len(rows)} of {total} rows in <b>{table}</b>
+        {f'| Search: "{search}"' if search else ""}
+      </p>
+
+      <div class="table-wrap">
+        <table>
+          <tr>{th}</tr>
+          {tr_html or f'<tr><td colspan="{len(cols)+1}" style="text-align:center;color:var(--muted);">No rows found</td></tr>'}
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div style="margin-top:12px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
+        <span style="font-size:12px;color:var(--muted);margin-right:6px;">Page {page}/{pages}:</span>
+        {pag}
+      </div>
+    </div>
+
+    <!-- Edit Modal -->
+    <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
+         z-index:1000;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:560px;
+                  max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+        <h2 style="margin-bottom:16px;color:var(--accent);">✏️ Edit Row</h2>
+        <div id="editFields"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          <button class="btn btn-primary" onclick="saveEdit()">💾 Save</button>
+          <button class="btn" style="background:var(--surface2);color:var(--text);"
+                  onclick="closeModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add Modal -->
+    <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
+         z-index:1000;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:560px;
+                  max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
+        <h2 style="margin-bottom:16px;color:var(--green);">➕ Add Row</h2>
+        <div id="addFields"></div>
+        <div style="display:flex;gap:8px;margin-top:16px;">
+          <button class="btn btn-success" onclick="saveAdd()">➕ Add</button>
+          <button class="btn" style="background:var(--surface2);color:var(--text);"
+                  onclick="closeModal()">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    const COLS   = {list(cols)};
+    const PK_COL = '{pk_col}';
+    const TABLE  = '{table}';
+    let   editPK = null;
+
+    function editRow(tbl, pk, pkval, vals) {{
+      editPK = pkval;
+      let html = '';
+      COLS.forEach((col,i) => {{
+        if (col === PK_COL) return;  // skip PK
+        const v = (vals[i] ?? '');
+        html += `<div class="form-group" style="margin-bottom:10px;">
+          <label>${{col}}</label>
+          <input id="ef_${{col}}" value="${{String(v).replace(/"/g,'&quot;')}}">
+        </div>`;
+      }});
+      document.getElementById('editFields').innerHTML = html;
+      document.getElementById('editModal').style.display = 'flex';
+    }}
+
+    function saveEdit() {{
+      const data = {{}};
+      COLS.forEach(col => {{
+        if (col === PK_COL) return;
+        const el = document.getElementById('ef_' + col);
+        if (el) data[col] = el.value;
+      }});
+      fetch('/dbmanager/update', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{table:TABLE, pk_col:PK_COL, pk_val:editPK, data:data}})
+      }}).then(r=>r.json()).then(d=>{{
+        if(d.ok) {{ closeModal(); location.reload(); }}
+        else alert('Error: ' + d.error);
+      }});
+    }}
+
+    function showAddRow(tbl) {{
+      let html = '';
+      COLS.forEach(col => {{
+        if (col === PK_COL) return;
+        html += `<div class="form-group" style="margin-bottom:10px;">
+          <label>${{col}}</label>
+          <input id="af_${{col}}" placeholder="${{col}}">
+        </div>`;
+      }});
+      document.getElementById('addFields').innerHTML = html;
+      document.getElementById('addModal').style.display = 'flex';
+    }}
+
+    function saveAdd() {{
+      const data = {{}};
+      COLS.forEach(col => {{
+        if (col === PK_COL) return;
+        const el = document.getElementById('af_' + col);
+        if (el && el.value) data[col] = el.value;
+      }});
+      fetch('/dbmanager/add', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{table:TABLE, data:data}})
+      }}).then(r=>r.json()).then(d=>{{
+        if(d.ok) {{ closeModal(); location.reload(); }}
+        else alert('Error: ' + d.error);
+      }});
+    }}
+
+    function delRow(tbl, pk_col, pk_val) {{
+      if (!confirm('Delete this row? This cannot be undone.')) return;
+      fetch('/dbmanager/delete', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{table:tbl, pk_col:pk_col, pk_val:pk_val}})
+      }}).then(r=>r.json()).then(d=>{{
+        if(d.ok) {{ document.getElementById('row_'+pk_val)?.remove(); }}
+        else alert('Error: ' + d.error);
+      }});
+    }}
+
+    function closeModal() {{
+      document.getElementById('editModal').style.display = 'none';
+      document.getElementById('addModal').style.display = 'none';
+    }}
+    // Close on backdrop click
+    ['editModal','addModal'].forEach(id => {{
+      document.getElementById(id).addEventListener('click', e => {{
+        if (e.target.id === id) closeModal();
+      }});
+    }});
+    </script>
+    """
+    return page("DB Manager", content, "dbmanager")
+
+@app.route("/dbmanager/update", methods=["POST"])
+@login_required
+@role_required("admin")
+def dbmanager_update():
+    try:
+        d = request.get_json()
+        table, pk_col, pk_val, data = d["table"], d["pk_col"], d["pk_val"], d["data"]
+        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
+        if not data: return jsonify({"ok":False,"error":"No data"})
+        conn = sqlite3.connect(DB_FILE)
+        sets = ", ".join([f"[{k}]=?" for k in data.keys()])
+        vals = list(data.values()) + [pk_val]
+        conn.execute(f"UPDATE [{table}] SET {sets} WHERE [{pk_col}]=?", vals)
+        conn.commit(); conn.close()
+        return jsonify({"ok":True})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)})
+
+@app.route("/dbmanager/delete", methods=["POST"])
+@login_required
+@role_required("admin")
+def dbmanager_delete():
+    try:
+        d = request.get_json()
+        table, pk_col, pk_val = d["table"], d["pk_col"], d["pk_val"]
+        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute(f"DELETE FROM [{table}] WHERE [{pk_col}]=?", (pk_val,))
+        conn.commit(); conn.close()
+        return jsonify({"ok":True})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)})
+
+@app.route("/dbmanager/add", methods=["POST"])
+@login_required
+@role_required("admin")
+def dbmanager_add():
+    try:
+        d = request.get_json()
+        table, data = d["table"], d["data"]
+        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
+        if not data: return jsonify({"ok":False,"error":"No data"})
+        conn = sqlite3.connect(DB_FILE)
+        col_str = ", ".join([f"[{k}]" for k in data.keys()])
+        vals = list(data.values())
+        cur = conn.execute(
+            f"INSERT INTO [{table}] ({col_str}) VALUES ({','.join(['?']*len(vals))})", vals)
+        conn.commit()
+        new_id = cur.lastrowid
+        conn.close()
+        return jsonify({"ok":True,"id":new_id})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)})
+
+@app.route("/dbmanager/download_csv")
+@login_required
+@role_required("admin")
+def dbmanager_download_csv():
+    table  = request.args.get("table","LoanEntry")
+    search = request.args.get("q","")
+    if table not in TABLES: table = "LoanEntry"
+    rows, total, cols = db_get_rows(table, search, page=1, per_page=100000)
+    si = io.StringIO()
+    writer = csv.writer(si)
+    writer.writerow(cols)
+    for row in rows:
+        writer.writerow([row.get(c,"") for c in cols])
+    output = si.getvalue()
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename={table}_{date.today()}.csv"}
+    )
+
+@app.route("/dbmanager/download_zip")
+@login_required
+@role_required("admin")
+def dbmanager_download_zip():
+    """Export ALL tables as CSV files inside a ZIP."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for table in TABLES:
+            try:
+                rows, _, cols = db_get_rows(table, page=1, per_page=99999)
+                si = io.StringIO()
+                writer = csv.writer(si)
+                writer.writerow(cols)
+                for row in rows:
+                    writer.writerow([row.get(c,"") for c in cols])
+                zf.writestr(f"{table}.csv", si.getvalue())
+            except Exception as e:
+                zf.writestr(f"{table}_error.txt", str(e))
+    buf.seek(0)
+    return send_file(
+        buf, as_attachment=True,
+        download_name=f"TFC_Database_{date.today()}.zip",
+        mimetype="application/zip"
+    )
+
+@app.route("/uploads/<path:filename>")
+@login_required
+def uploaded_file(filename):
+    return send_file(os.path.join(UPLOAD_FOLDER, filename))
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  ENTRY POINT
