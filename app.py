@@ -76,13 +76,15 @@ SMS_CONFIG = {
 }
 
 ROLES = {
-    "admin":    {"label":"Admin",    "can_approve":True,  "can_reject":True,  "can_add":True,  "can_pay":True,  "can_report":True},
-    "manager":  {"label":"Manager",  "can_approve":False, "can_reject":False, "can_add":True,  "can_pay":True,  "can_report":True},
-    "fieldpia": {"label":"Fieldpia", "can_approve":False, "can_reject":False, "can_add":True,  "can_pay":True,  "can_report":False},
-    "viewer":   {"label":"Viewer",   "can_approve":False, "can_reject":False, "can_add":False, "can_pay":False, "can_report":True},
+    "superadmin":{"label":"Super Admin","can_approve":True,"can_reject":True,"can_add":True,"can_pay":True,"can_report":True,"can_edit":True,"can_db":True},
+    "admin":    {"label":"Admin",    "can_approve":True,  "can_reject":True,  "can_add":True,  "can_pay":True,  "can_report":True, "can_edit":False,"can_db":False},
+    "manager":  {"label":"Manager",  "can_approve":False, "can_reject":False, "can_add":True,  "can_pay":True,  "can_report":True, "can_edit":False,"can_db":False},
+    "fieldpia": {"label":"Fieldpia", "can_approve":False, "can_reject":False, "can_add":True,  "can_pay":True,  "can_report":False,"can_edit":False,"can_db":False},
+    "viewer":   {"label":"Viewer",   "can_approve":False, "can_reject":False, "can_add":False, "can_pay":False, "can_report":True, "can_edit":False,"can_db":False},
 }
 
 DEFAULT_USERS = {
+    "superadmin":{"role":"superadmin","pw_hash": hashlib.sha256(b"superadmin123").hexdigest()},
     "admin":    {"role":"admin",    "pw_hash": hashlib.sha256(b"admin123").hexdigest()},
     "manager":  {"role":"manager",  "pw_hash": hashlib.sha256(b"manager123").hexdigest()},
     "fieldpia": {"role":"fieldpia", "pw_hash": hashlib.sha256(b"field123").hexdigest()},
@@ -896,6 +898,7 @@ tr.row-paid td{opacity:.65;}
 .badge-closed{background:#e0e7ff;color:#3730a3;}
 .badge-partial,.badge-average{background:#ffedd5;color:#9a3412;}
 .badge-admin{background:var(--accent);color:#fff;}
+.badge-superadmin{background:linear-gradient(135deg,#7c3aed,#dc2626);color:#fff;box-shadow:0 1px 4px rgba(124,58,237,.4);}
 .badge-manager{background:#059669;color:#fff;}
 .badge-fieldpia{background:#d97706;color:#fff;}
 .badge-viewer{background:#6b7280;color:#fff;}
@@ -1010,6 +1013,7 @@ def _nav_links(role, active):
     can_approve = ROLES.get(role,{}).get("can_approve", False)
     can_add     = ROLES.get(role,{}).get("can_add",     False)
     can_report  = ROLES.get(role,{}).get("can_report",  False)
+    can_db      = ROLES.get(role,{}).get("can_db",      False)
 
     def lnk(href, icon, label, key):
         cls = "active" if active == key else ""
@@ -1025,8 +1029,8 @@ def _nav_links(role, active):
     links += lnk("/rejected","❌","Rejected","rejected")
     links += lnk("/calculator","🧮","Calculator","calculator")
     if can_report:  links += lnk("/report","📊","Report","report")
-    if role=="admin": links += lnk("/users","⚙️","Users","users")
-    if role=="admin": links += lnk("/dbmanager","🗄️","DB Manager","dbmanager")
+    if role in ("admin","superadmin"): links += lnk("/users","⚙️","Users","users")
+    if can_db:      links += lnk("/database","🗄️","Database","database")
     return links
 
 def page(title, content, active=""):
@@ -1708,14 +1712,21 @@ def approval():
 def customers():
     q = request.args.get("q","")
     cl = list_customers(q)
+    role = session.get("role","")
+    can_edit = ROLES.get(role,{}).get("can_edit", False)
     rows = ""
     for c in cl:
         sc = {"Active":"approved","Closed":"closed"}.get(c["status"],"pending")
+        lid = c["loan_id"]
+        edit_btn = f'<a class="btn btn-sm btn-amber" href="/customer/edit/{lid}">&#9998; Edit</a>' if can_edit else ""
         rows += f"""<tr>
           <td><b>{c['name']}</b></td><td>{c['vehicle_type']}</td>
           <td>₹{c['loan_amount']:,.2f}</td><td><b>₹{c['emi_amount']:,.2f}</b></td>
           <td><span class="badge badge-{sc}">{c['status']}</span></td>
-          <td><a class="btn btn-sm btn-primary" href="/emis/{c['loan_id']}">View EMIs</a></td>
+          <td style="white-space:nowrap;">
+            <a class="btn btn-sm btn-primary" href="/emis/{c['loan_id']}">View EMIs</a>
+            {edit_btn}
+          </td>
         </tr>"""
     content = f"""
     <h1>👥 Customers</h1>
@@ -1724,10 +1735,176 @@ def customers():
       <button class="btn btn-primary btn-sm">Search</button>
     </form>
     <div class="card"><div class="table-wrap"><table>
-      <tr><th>Name</th><th>Vehicle</th><th>Loan Amt</th><th>EMI/mo</th><th>Status</th><th>EMIs</th></tr>
+      <tr><th>Name</th><th>Vehicle</th><th>Loan Amt</th><th>EMI/mo</th><th>Status</th><th>Actions</th></tr>
       {rows or '<tr><td colspan="6" style="text-align:center;color:var(--muted);">No customers found</td></tr>'}
     </table></div></div>"""
     return page("Customers", content, "customers")
+
+# ── Customer Edit (Super Admin only) ──────────────────────────────────────────
+@app.route("/customer/edit/<int:loan_id>", methods=["GET","POST"])
+@login_required
+@role_required("superadmin")
+def customer_edit(loan_id):
+    c = get_cur()
+    c.execute("SELECT * FROM LoanEntry WHERE id=?", (loan_id,))
+    loan = dict(c.fetchone() or {})
+    if not loan:
+        flash("Loan not found.","danger")
+        return redirect(url_for("customers"))
+
+    if request.method == "POST":
+        f = request.form
+        try:
+            c.execute("""UPDATE LoanEntry SET
+                customer_name=?, customer_mobile=?, customer_address=?, customer_location=?,
+                customer_email=?, vehicle_type=?, vehicle_number=?, vehicle_model=?,
+                engine_number=?, chassis_number=?, vehicle_colour=?,
+                guarantor_name=?, guarantor_address=?, guarantor_mobile=?,
+                loan_amount=?, interest_rate=?, tenure=?, start_date=?, remarks=?
+                WHERE id=?""",
+                (f.get("customer_name","").strip(),
+                 f.get("customer_mobile","").strip(),
+                 f.get("customer_address","").strip(),
+                 f.get("customer_location","").strip(),
+                 f.get("customer_email","").strip(),
+                 f.get("vehicle_type","").strip(),
+                 f.get("vehicle_number","").strip(),
+                 f.get("vehicle_model","").strip(),
+                 f.get("engine_number","").strip(),
+                 f.get("chassis_number","").strip(),
+                 f.get("vehicle_colour","").strip(),
+                 f.get("guarantor_name","").strip(),
+                 f.get("guarantor_address","").strip(),
+                 f.get("guarantor_mobile","").strip(),
+                 float(f.get("loan_amount",0)),
+                 float(f.get("interest_rate",0))/100 if float(f.get("interest_rate",0))>1 else float(f.get("interest_rate",0)),
+                 int(f.get("tenure",0)),
+                 f.get("start_date",""),
+                 f.get("remarks","").strip(),
+                 loan_id))
+            # Also update Customers summary table
+            new_amt = float(f.get("loan_amount",0))
+            rate_raw = float(f.get("interest_rate",0))
+            rate = rate_raw/100 if rate_raw>1 else rate_raw
+            tenure = int(f.get("tenure",0))
+            emi_amt = compute_emi_amount(new_amt, rate, tenure) if tenure>0 else 0
+            c.execute("UPDATE Customers SET name=?,vehicle_type=?,loan_amount=?,emi_amount=? WHERE loan_id=?",
+                      (f.get("customer_name","").strip(), f.get("vehicle_type","").strip(), new_amt, emi_amt, loan_id))
+            get_db().commit()
+            flash("Customer / Loan details updated successfully!", "success")
+            return redirect(url_for("customers"))
+        except Exception as e:
+            flash(f"Error updating: {e}", "danger")
+
+    # Display rate as percentage
+    rate_display = round(float(loan.get("interest_rate",0))*100, 4)
+
+    content = f"""
+    <h1>✏️ Edit Customer — {loan.get('loan_number','')}</h1>
+    <div class="alert alert-warning">⚠️ <b>Super Admin Edit:</b> Changes here directly update the database. Proceed with care.</div>
+    <div class="card">
+    <form method="POST">
+      <div class="form-grid">
+        <div class="section-title">📄 Loan Details</div>
+        <div class="form-group">
+          <label>Loan Number</label>
+          <input value="{loan.get('loan_number','')}" readonly>
+        </div>
+        <div class="form-group">
+          <label>Start Date *</label>
+          <input type="date" name="start_date" value="{loan.get('start_date','')}" required>
+        </div>
+        <div class="form-group">
+          <label>Loan Amount (₹) *</label>
+          <input type="number" name="loan_amount" value="{loan.get('loan_amount',0)}" min="1" step="0.01" required>
+        </div>
+        <div class="form-group">
+          <label>Interest Rate (% p.a.) *</label>
+          <input type="number" name="interest_rate" value="{rate_display}" min="0" step="0.01" required>
+        </div>
+        <div class="form-group">
+          <label>Tenure (Months) *</label>
+          <input type="number" name="tenure" value="{loan.get('tenure',0)}" min="1" max="360" required>
+        </div>
+        <div class="form-group">
+          <label>Vehicle Type *</label>
+          <select name="vehicle_type" required>
+            {''.join(f'<option value="{v}" {"selected" if loan.get("vehicle_type")==v else ""}>{v}</option>' for v in ["Two Wheeler","Three Wheeler","Four Wheeler","Commercial Vehicle","Other"])}
+          </select>
+        </div>
+
+        <div class="section-title">👤 Customer Details</div>
+        <div class="form-group">
+          <label>Customer Name *</label>
+          <input name="customer_name" value="{loan.get('customer_name','')}" required>
+        </div>
+        <div class="form-group">
+          <label>Mobile (10 digits)</label>
+          <input name="customer_mobile" value="{loan.get('customer_mobile','')}" maxlength="10"
+                 oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10)">
+        </div>
+        <div class="form-group full">
+          <label>Address</label>
+          <textarea name="customer_address" rows="2">{loan.get('customer_address','')}</textarea>
+        </div>
+        <div class="form-group full">
+          <label>GPS Location</label>
+          <input name="customer_location" value="{loan.get('customer_location','')}">
+        </div>
+        <div class="form-group">
+          <label>Email</label>
+          <input type="email" name="customer_email" value="{loan.get('customer_email','')}">
+        </div>
+
+        <div class="section-title">🚗 Vehicle Details</div>
+        <div class="form-group">
+          <label>Vehicle Number</label>
+          <input name="vehicle_number" value="{loan.get('vehicle_number','')}">
+        </div>
+        <div class="form-group">
+          <label>Vehicle Model</label>
+          <input name="vehicle_model" value="{loan.get('vehicle_model','')}">
+        </div>
+        <div class="form-group">
+          <label>Engine Number</label>
+          <input name="engine_number" value="{loan.get('engine_number','')}">
+        </div>
+        <div class="form-group">
+          <label>Chassis Number</label>
+          <input name="chassis_number" value="{loan.get('chassis_number','')}">
+        </div>
+        <div class="form-group">
+          <label>Vehicle Colour</label>
+          <input name="vehicle_colour" value="{loan.get('vehicle_colour','')}">
+        </div>
+
+        <div class="section-title">🛡️ Guarantor Details</div>
+        <div class="form-group">
+          <label>Guarantor Name</label>
+          <input name="guarantor_name" value="{loan.get('guarantor_name','')}">
+        </div>
+        <div class="form-group">
+          <label>Guarantor Mobile</label>
+          <input name="guarantor_mobile" value="{loan.get('guarantor_mobile','')}" maxlength="10"
+                 oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,10)">
+        </div>
+        <div class="form-group full">
+          <label>Guarantor Address</label>
+          <textarea name="guarantor_address" rows="2">{loan.get('guarantor_address','')}</textarea>
+        </div>
+
+        <div class="section-title">📝 Remarks</div>
+        <div class="form-group full">
+          <textarea name="remarks" rows="3">{loan.get('remarks','')}</textarea>
+        </div>
+      </div>
+      <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+        <button type="submit" class="btn btn-primary">💾 Save Changes</button>
+        <a href="/customers" class="btn" style="background:var(--surface2);color:var(--text);">Cancel</a>
+      </div>
+    </form>
+    </div>"""
+    return page("Edit Customer", content, "customers")
 
 # ── EMIs ────────────────────────────────────────────────────────────────────────
 @app.route("/emis/<int:loan_id>")
@@ -1736,6 +1913,7 @@ def emis(loan_id):
     c = get_cur(); c.execute("SELECT * FROM LoanEntry WHERE id=?", (loan_id,))
     loan = dict(c.fetchone() or {}); emi_list = get_emis_for_loan(loan_id)
     role = session.get("role",""); can_pay = ROLES.get(role,{}).get("can_pay", False)
+    can_edit_emi = ROLES.get(role,{}).get("can_edit", False)
     today = date.today(); upcoming_limit = today + timedelta(days=UPCOMING_DAYS)
 
     total_remaining = sum(float(e.get("remaining_amount") or e["emi_amount"])
@@ -1770,12 +1948,15 @@ def emis(loan_id):
               <button class="btn btn-success btn-sm" onclick="return chkBill(this)">Pay</button>
             </form>"""
 
+        emi_edit_link = f'<a class="btn btn-sm btn-amber" href="/emi/edit/{e["emi_id"]}?loan_id={loan_id}">&#9998;</a>' if can_edit_emi else ""
         rows += f'<tr class="{row_class}" id="emi_{e["emi_id"]}">'
         rows += f"""<td>{e['installment_no']}</td><td>{e['due_date']}</td>
           <td>₹{e['emi_amount']:,.2f}</td><td>₹{float(e['amount_paid'] or 0):,.2f}</td>
           <td><b>₹{remaining:,.2f}</b></td>
           <td><span class="badge badge-{sc}">{e['status']}</span></td>
-          <td>{bill_no}</td><td>{paid_at}</td><td>{pay_form}</td>
+          <td>{bill_no}</td><td>{paid_at}</td>
+          <td style="white-space:nowrap;">{pay_form}{emi_edit_link}
+          </td>
         </tr>"""
 
     # Legend
@@ -2062,7 +2243,7 @@ def report():
 # ── Users ──────────────────────────────────────────────────────────────────────
 @app.route("/users", methods=["GET","POST"])
 @login_required
-@role_required("admin")
+@role_required("admin","superadmin")
 def users():
     if request.method == "POST":
         uname = request.form["username"].strip(); pw = request.form["password"]; role_u = request.form["role"]
@@ -2278,425 +2459,431 @@ def sms_settings():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  DATABASE MANAGER (Admin only)
+#  EMI EDIT (Super Admin only)
 # ══════════════════════════════════════════════════════════════════════════════
-TABLES = ["LoanEntry","Customers","EMI","RejectedLoans","ClosedLoans","Users"]
-
-def _row_val(row, key_str, key_int):
-    """Safely get value from sqlite3.Row or dict by name or index."""
-    try:
-        if isinstance(row, dict):
-            return row.get(key_str)
-        return row[key_str]   # sqlite3.Row supports name access
-    except Exception:
-        try:
-            return row[key_int]
-        except Exception:
-            return None
-
-def db_get_tables():
-    """Return list of table names in the database."""
-    try:
-        # Use raw sqlite3 for reliability
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        tables = [row["name"] for row in cur.fetchall()]
-        conn.close()
-        return tables
-    except Exception:
-        return TABLES
-
-def db_get_columns(table):
-    """Return list of column dicts {name, type} for a table."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        cur = conn.cursor()
-        cur.execute(f"PRAGMA table_info([{table}])")
-        cols = [{"cid": row[0], "name": row[1], "type": row[2]} for row in cur.fetchall()]
-        conn.close()
-        return cols
-    except Exception as e:
-        print(f"[db_get_columns] {e}")
-        return []
-
-def db_get_rows(table, search="", page=1, per_page=30):
-    """Return (rows_list, total_count, col_names) for a table."""
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cols_info = db_get_columns(table)
-        cols = [c["name"] for c in cols_info]
-        offset = (page - 1) * per_page
-
-        if search and cols:
-            like = f"%{search}%"
-            search_cols = cols[:5]   # search first 5 columns
-            where = " OR ".join([f"CAST([{col}] AS TEXT) LIKE ?" for col in search_cols])
-            params = [like] * len(search_cols)
-            cur.execute(f"SELECT * FROM [{table}] WHERE {where} LIMIT ? OFFSET ?",
-                        params + [per_page, offset])
-            rows = [dict(row) for row in cur.fetchall()]
-            cur.execute(f"SELECT COUNT(*) FROM [{table}] WHERE {where}", params)
-            total = cur.fetchone()[0] or 0
-        else:
-            cur.execute(f"SELECT * FROM [{table}] LIMIT ? OFFSET ?", (per_page, offset))
-            rows = [dict(row) for row in cur.fetchall()]
-            cur.execute(f"SELECT COUNT(*) FROM [{table}]")
-            total = cur.fetchone()[0] or 0
-
-        conn.close()
-        return rows, total, cols
-    except Exception as e:
-        print(f"[db_get_rows] {e}")
-        return [], 0, []
-
-def db_delete_row(table, pk_col, pk_val):
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute(f"DELETE FROM [{table}] WHERE [{pk_col}]=?", (pk_val,))
-    conn.commit(); conn.close()
-
-def db_update_row(table, pk_col, pk_val, data):
-    if not data: return
-    conn = sqlite3.connect(DB_FILE)
-    sets = ", ".join([f"[{k}]=?" for k in data.keys()])
-    vals = list(data.values()) + [pk_val]
-    conn.execute(f"UPDATE [{table}] SET {sets} WHERE [{pk_col}]=?", vals)
-    conn.commit(); conn.close()
-
-def db_delete_row(table, pk_col, pk_val):
-    c = get_cur()
-    c.execute(f"DELETE FROM {table} WHERE {pk_col}=?", (pk_val,))
-    get_db().commit()
-
-def db_update_row(table, pk_col, pk_val, data):
-    if not data: return
-    sets = ", ".join([f"{k}=?" for k in data.keys()])
-    vals = list(data.values()) + [pk_val]
-    c = get_cur()
-    c.execute(f"UPDATE {table} SET {sets} WHERE {pk_col}=?", vals)
-    get_db().commit()
-
-PK_MAP = {
-    "LoanEntry":"id","Customers":"customer_id","EMI":"emi_id",
-    "RejectedLoans":"reject_id","ClosedLoans":"close_id","Users":"user_id"
-}
-
-@app.route("/dbmanager")
+@app.route("/emi/edit/<int:emi_id>", methods=["GET","POST"])
 @login_required
-@role_required("admin")
-def dbmanager():
-    table   = request.args.get("table","LoanEntry")
-    search  = request.args.get("q","")
-    page    = int(request.args.get("page",1))
-    if table not in TABLES: table = "LoanEntry"
-    rows, total, cols = db_get_rows(table, search, page)
-    pages   = max(1,(total+29)//30)
-    pk_col  = PK_MAP.get(table,"id")
+@role_required("superadmin")
+def emi_edit(emi_id):
+    c = get_cur()
+    loan_id = request.args.get("loan_id", type=int) or request.form.get("loan_id", type=int)
+    c.execute("SELECT * FROM EMI WHERE emi_id=?", (emi_id,))
+    emi = dict(c.fetchone() or {})
+    if not emi:
+        flash("EMI not found.", "danger")
+        return redirect(url_for("customers"))
+
+    if not loan_id:
+        loan_id = emi.get("loan_id")
+
+    if request.method == "POST":
+        f = request.form
+        try:
+            new_status = f.get("status","Pending")
+            new_due    = f.get("due_date","")
+            new_emi    = float(f.get("emi_amount", emi.get("emi_amount",0)))
+            new_paid   = float(f.get("amount_paid", emi.get("amount_paid",0)))
+            new_remain = float(f.get("remaining_amount", emi.get("remaining_amount",0)))
+            new_extra  = float(f.get("extra_interest", emi.get("extra_interest",0)))
+            new_bill   = f.get("bill_number","").strip()
+            new_paid_at = f.get("paid_at","").strip() or None
+
+            c.execute("""UPDATE EMI SET due_date=?,emi_amount=?,status=?,amount_paid=?,
+                         remaining_amount=?,extra_interest=?,bill_number=?,paid_at=?
+                         WHERE emi_id=?""",
+                      (new_due, new_emi, new_status, new_paid, new_remain,
+                       new_extra, new_bill, new_paid_at, emi_id))
+            get_db().commit()
+            flash("EMI updated successfully!", "success")
+            return redirect(url_for("emis", loan_id=loan_id) + f"#emi_{emi_id}")
+        except Exception as e:
+            flash(f"Error: {e}", "danger")
+
+    c.execute("SELECT loan_number, customer_name FROM LoanEntry WHERE id=?", (loan_id,))
+    loan_row = c.fetchone() or {}
+    status_options = ["Pending","Paid","Partial","Overdue"]
+
+    content = f"""
+    <h1>✏️ Edit EMI #{emi.get('installment_no','')} — {dict(loan_row).get('loan_number','')}</h1>
+    <div class="alert alert-warning">⚠️ <b>Super Admin Edit:</b> Direct database update. Use carefully.</div>
+    <div class="card">
+    <form method="POST">
+      <input type="hidden" name="loan_id" value="{loan_id}">
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Installment #</label>
+          <input value="{emi.get('installment_no','')}" readonly>
+        </div>
+        <div class="form-group">
+          <label>Due Date</label>
+          <input type="date" name="due_date" value="{emi.get('due_date','')}">
+        </div>
+        <div class="form-group">
+          <label>EMI Amount (₹)</label>
+          <input type="number" name="emi_amount" value="{emi.get('emi_amount',0)}" step="0.01" min="0">
+        </div>
+        <div class="form-group">
+          <label>Amount Paid (₹)</label>
+          <input type="number" name="amount_paid" value="{float(emi.get('amount_paid') or 0)}" step="0.01" min="0">
+        </div>
+        <div class="form-group">
+          <label>Remaining Amount (₹)</label>
+          <input type="number" name="remaining_amount" value="{float(emi.get('remaining_amount') or emi.get('emi_amount',0))}" step="0.01" min="0">
+        </div>
+        <div class="form-group">
+          <label>Extra Interest (₹)</label>
+          <input type="number" name="extra_interest" value="{float(emi.get('extra_interest') or 0)}" step="0.01" min="0">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select name="status">
+            {''.join(f'<option value="{s}" {"selected" if emi.get("status")==s else ""}>{s}</option>' for s in status_options)}
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Bill Number</label>
+          <input name="bill_number" value="{emi.get('bill_number') or ''}">
+        </div>
+        <div class="form-group">
+          <label>Paid At (datetime)</label>
+          <input name="paid_at" value="{(emi.get('paid_at') or '')[:19]}" placeholder="YYYY-MM-DDTHH:MM:SS">
+        </div>
+      </div>
+      <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
+        <button type="submit" class="btn btn-primary">💾 Save EMI Changes</button>
+        <a href="/emis/{loan_id}" class="btn" style="background:var(--surface2);color:var(--text);">Cancel</a>
+      </div>
+    </form>
+    </div>"""
+    return page("Edit EMI", content, "emis")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DATABASE MANAGER (Super Admin only)
+# ══════════════════════════════════════════════════════════════════════════════
+DB_TABLES = ["LoanEntry","Customers","EMI","RejectedLoans","ClosedLoans","Users"]
+
+@app.route("/database")
+@login_required
+@role_required("superadmin")
+def database_view():
+    tbl = request.args.get("table", DB_TABLES[0])
+    if tbl not in DB_TABLES:
+        tbl = DB_TABLES[0]
+
+    c = get_cur()
+    # Get columns
+    c.execute(f"PRAGMA table_info({tbl})")
+    cols = [r[1] if isinstance(r, (list,tuple)) else r["name"] for r in c.fetchall()]
+
+    # Get rows
+    search = request.args.get("q","")
+    if search and cols:
+        like_clause = " OR ".join([f"{col} LIKE ?" for col in cols])
+        params = tuple(f"%{search}%" for _ in cols)
+        c.execute(f"SELECT * FROM {tbl} WHERE {like_clause} ORDER BY rowid DESC LIMIT 500", params)
+    else:
+        c.execute(f"SELECT * FROM {tbl} ORDER BY rowid DESC LIMIT 500")
+    rows = c.fetchall()
+
+    # Build table counts
+    table_counts = {}
+    for t in DB_TABLES:
+        try:
+            c.execute(f"SELECT COUNT(*) FROM {t}")
+            r = c.fetchone()
+            table_counts[t] = r[0] if isinstance(r,(list,tuple)) else list(r.values())[0]
+        except:
+            table_counts[t] = "?"
 
     # Table tabs
-    tab_links = ""
-    for t in TABLES:
-        active_cls = 'style="background:var(--accent);color:#fff;"' if t==table else 'style="background:var(--surface2);color:var(--text);"'
-        tab_links += f'<a href="/dbmanager?table={t}" class="btn btn-sm" {active_cls}>{t}</a> '
+    tab_html = ""
+    for t in DB_TABLES:
+        active_cls = "btn-primary" if t==tbl else ""
+        tab_html += f'<a href="/database?table={t}" class="btn btn-sm {active_cls}" style="{"" if t==tbl else "background:var(--surface2);color:var(--text);"}">{t} <span style="font-size:11px;opacity:.7;">({table_counts.get(t,0)})</span></a>'
 
-    # Column headers
-    th = "".join(f"<th>{c}</th>" for c in cols) + "<th>Actions</th>"
+    # Header row
+    th_html = "".join(f"<th>{col}</th>" for col in cols) + "<th>Actions</th>"
 
-    # Rows
+    # Data rows
     tr_html = ""
+    pk_col = cols[0] if cols else "rowid"
     for row in rows:
-        pk_val = row.get(pk_col,"")
-        cells = "".join(
-            f'<td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{str(row.get(c,"")).replace(chr(34),chr(39))}">{str(row.get(c,"") or "")[:60]}</td>'
-            for c in cols
-        )
-        tr_html += f"""<tr id="row_{pk_val}">
-          {cells}
-          <td style="white-space:nowrap;">
-            <button class="btn btn-sm btn-primary" onclick="editRow('{table}','{pk_col}','{pk_val}',{list(row.values())})">✏️</button>
-            <button class="btn btn-sm btn-danger"  onclick="delRow('{table}','{pk_col}','{pk_val}')">🗑️</button>
-          </td>
+        row_dict = dict(zip(cols, [row[i] if isinstance(row,(list,tuple)) else row[col] for i,col in enumerate(cols)]))
+        pk_val = row_dict.get(pk_col,"")
+        td_html = "".join(f'<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{str(row_dict.get(col,"") or "")}">{str(row_dict.get(col,"") or "")}</td>' for col in cols)
+        tr_html += f"""<tr>
+            {td_html}
+            <td style="white-space:nowrap;">
+              <a class="btn btn-sm btn-amber" href="/database/edit/{tbl}/{pk_val}">✏️ Edit</a>
+              <a class="btn btn-sm btn-danger" href="/database/delete/{tbl}/{pk_val}"
+                 onclick="return confirm('Delete this row permanently?')">🗑️</a>
+            </td>
         </tr>"""
 
-    # Pagination
-    pag = ""
-    for p in range(max(1,page-2), min(pages,page+2)+1):
-        active = "btn-primary" if p==page else ""
-        pag += f'<a href="/dbmanager?table={table}&q={search}&page={p}" class="btn btn-sm {active}" style="{"" if active else "background:var(--surface2);color:var(--text);"}">{p}</a> '
+    if not tr_html:
+        tr_html = f'<tr><td colspan="{len(cols)+1}" style="text-align:center;color:var(--muted);">No data found</td></tr>'
 
     content = f"""
     <h1>🗄️ Database Manager</h1>
-    <div class="card" style="padding:12px;margin-bottom:12px;">
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
-        <b style="font-size:13px;">Table:</b>
-        {tab_links}
+    <div class="alert alert-warning">⚠️ <b>Super Admin Only:</b> Direct database access. All changes are permanent and immediate.</div>
+
+    <!-- Table Selector -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+      {tab_html}
+    </div>
+
+    <!-- Download Buttons -->
+    <div class="card" style="margin-bottom:16px;">
+      <h2 style="margin-bottom:10px;">📥 Download Database</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <a href="/database/download/db" class="btn btn-primary">⬇️ SQLite .db File</a>
+        <a href="/database/download/sql" class="btn btn-primary">⬇️ SQL Dump</a>
+        <a href="/database/download/zip" class="btn btn-primary">⬇️ All CSVs as ZIP</a>
+        <a href="/database/download/csv?table={tbl}" class="btn btn-success">⬇️ Current Table CSV ({tbl})</a>
       </div>
     </div>
 
+    <!-- Search + Table Data -->
     <div class="card">
-      <!-- Toolbar -->
-      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
-        <form method="GET" style="display:flex;gap:6px;flex:1;min-width:200px;">
-          <input type="hidden" name="table" value="{table}">
-          <input name="q" value="{search}" placeholder="Search…" style="max-width:220px;">
-          <button class="btn btn-primary btn-sm">Search</button>
-        </form>
-        <a href="/dbmanager/download_csv?table={table}&q={search}" class="btn btn-sm btn-success">📥 CSV</a>
-        <a href="/dbmanager/download_zip" class="btn btn-sm btn-amber">📦 Full ZIP</a>
-        <button class="btn btn-sm" style="background:#6366f1;color:#fff;"
-                onclick="showAddRow('{table}')">➕ Add Row</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px;">
+        <h2 style="margin:0;">📋 {tbl} <span style="font-size:13px;color:var(--muted);font-weight:400;">({table_counts.get(tbl,0)} rows)</span></h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <form method="GET" style="display:flex;gap:6px;align-items:center;">
+            <input type="hidden" name="table" value="{tbl}">
+            <input name="q" value="{search}" placeholder="Search all columns…" style="width:200px;">
+            <button class="btn btn-sm btn-primary">Search</button>
+          </form>
+          <a href="/database/add/{tbl}" class="btn btn-sm btn-success">➕ Add Row</a>
+        </div>
       </div>
-
-      <p style="font-size:12px;color:var(--muted);margin-bottom:8px;">
-        Showing {len(rows)} of {total} rows in <b>{table}</b>
-        {f'| Search: "{search}"' if search else ""}
-      </p>
-
       <div class="table-wrap">
         <table>
-          <tr>{th}</tr>
-          {tr_html or f'<tr><td colspan="{len(cols)+1}" style="text-align:center;color:var(--muted);">No rows found</td></tr>'}
+          <tr>{th_html}</tr>
+          {tr_html}
         </table>
       </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:8px;">Showing up to 500 rows. Use search to filter.</p>
+    </div>"""
+    return page("Database", content, "database")
 
-      <!-- Pagination -->
-      <div style="margin-top:12px;display:flex;gap:4px;flex-wrap:wrap;align-items:center;">
-        <span style="font-size:12px;color:var(--muted);margin-right:6px;">Page {page}/{pages}:</span>
-        {pag}
-      </div>
-    </div>
 
-    <!-- Edit Modal -->
-    <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
-         z-index:1000;align-items:center;justify-content:center;padding:16px;">
-      <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:560px;
-                  max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
-        <h2 style="margin-bottom:16px;color:var(--accent);">✏️ Edit Row</h2>
-        <div id="editFields"></div>
-        <div style="display:flex;gap:8px;margin-top:16px;">
-          <button class="btn btn-primary" onclick="saveEdit()">💾 Save</button>
-          <button class="btn" style="background:var(--surface2);color:var(--text);"
-                  onclick="closeModal()">Cancel</button>
+@app.route("/database/edit/<table>/<pk>", methods=["GET","POST"])
+@login_required
+@role_required("superadmin")
+def database_edit_row(table, pk):
+    if table not in DB_TABLES:
+        flash("Invalid table.","danger"); return redirect(url_for("database_view"))
+    c = get_cur()
+    c.execute(f"PRAGMA table_info({table})")
+    col_info = c.fetchall()
+    cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+    pk_col = cols[0] if cols else "rowid"
+
+    c.execute(f"SELECT * FROM {table} WHERE {pk_col}=?", (pk,))
+    row = c.fetchone()
+    if not row:
+        flash("Row not found.","danger"); return redirect(url_for("database_view", table=table))
+    row_dict = dict(zip(cols, [row[i] if isinstance(row,(list,tuple)) else row[col] for i,col in enumerate(cols)]))
+
+    if request.method == "POST":
+        f = request.form
+        updates = [f"{col}=?" for col in cols if col != pk_col]
+        vals = [f.get(col,"") for col in cols if col != pk_col]
+        vals.append(pk)
+        try:
+            c.execute(f"UPDATE {table} SET {', '.join(updates)} WHERE {pk_col}=?", vals)
+            get_db().commit()
+            flash(f"Row updated in {table}.", "success")
+            return redirect(url_for("database_view", table=table))
+        except Exception as e:
+            flash(f"Error: {e}", "danger")
+
+    fields_html = ""
+    for col in cols:
+        readonly = ' readonly style="background:var(--surface2);color:var(--muted);"' if col == pk_col else ""
+        val = str(row_dict.get(col,"") or "")
+        fields_html += f"""<div class="form-group">
+          <label>{col}</label>
+          <input name="{col}" value="{val.replace('"','&quot;')}"{readonly}>
+        </div>"""
+
+    content = f"""
+    <h1>✏️ Edit Row — {table}</h1>
+    <div class="alert alert-warning">⚠️ <b>Super Admin:</b> Direct database row edit.</div>
+    <div class="card">
+      <form method="POST">
+        <div class="form-grid">{fields_html}</div>
+        <div style="margin-top:18px;display:flex;gap:10px;">
+          <button type="submit" class="btn btn-primary">💾 Save</button>
+          <a href="/database?table={table}" class="btn" style="background:var(--surface2);color:var(--text);">Cancel</a>
         </div>
-      </div>
-    </div>
+      </form>
+    </div>"""
+    return page("Edit DB Row", content, "database")
 
-    <!-- Add Modal -->
-    <div id="addModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
-         z-index:1000;align-items:center;justify-content:center;padding:16px;">
-      <div style="background:#fff;border-radius:12px;padding:24px;width:100%;max-width:560px;
-                  max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.2);">
-        <h2 style="margin-bottom:16px;color:var(--green);">➕ Add Row</h2>
-        <div id="addFields"></div>
-        <div style="display:flex;gap:8px;margin-top:16px;">
-          <button class="btn btn-success" onclick="saveAdd()">➕ Add</button>
-          <button class="btn" style="background:var(--surface2);color:var(--text);"
-                  onclick="closeModal()">Cancel</button>
+
+@app.route("/database/add/<table>", methods=["GET","POST"])
+@login_required
+@role_required("superadmin")
+def database_add_row(table):
+    if table not in DB_TABLES:
+        flash("Invalid table.","danger"); return redirect(url_for("database_view"))
+    c = get_cur()
+    c.execute(f"PRAGMA table_info({table})")
+    col_info = c.fetchall()
+    cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+    pk_col = cols[0] if cols else "rowid"
+
+    if request.method == "POST":
+        f = request.form
+        insert_cols = [col for col in cols if col != pk_col]
+        vals = [f.get(col,"") or None for col in insert_cols]
+        placeholders = ",".join(["?" for _ in insert_cols])
+        try:
+            c.execute(f"INSERT INTO {table} ({','.join(insert_cols)}) VALUES ({placeholders})", vals)
+            get_db().commit()
+            flash(f"Row added to {table}.", "success")
+            return redirect(url_for("database_view", table=table))
+        except Exception as e:
+            flash(f"Error: {e}", "danger")
+
+    fields_html = ""
+    for col in cols:
+        if col == pk_col: continue
+        fields_html += f"""<div class="form-group">
+          <label>{col}</label>
+          <input name="{col}" value="">
+        </div>"""
+
+    content = f"""
+    <h1>➕ Add Row — {table}</h1>
+    <div class="card">
+      <form method="POST">
+        <div class="form-grid">{fields_html}</div>
+        <div style="margin-top:18px;display:flex;gap:10px;">
+          <button type="submit" class="btn btn-success">➕ Insert Row</button>
+          <a href="/database?table={table}" class="btn" style="background:var(--surface2);color:var(--text);">Cancel</a>
         </div>
-      </div>
-    </div>
+      </form>
+    </div>"""
+    return page("Add DB Row", content, "database")
 
-    <script>
-    const COLS   = {list(cols)};
-    const PK_COL = '{pk_col}';
-    const TABLE  = '{table}';
-    let   editPK = null;
 
-    function editRow(tbl, pk, pkval, vals) {{
-      editPK = pkval;
-      let html = '';
-      COLS.forEach((col,i) => {{
-        if (col === PK_COL) return;  // skip PK
-        const v = (vals[i] ?? '');
-        html += `<div class="form-group" style="margin-bottom:10px;">
-          <label>${{col}}</label>
-          <input id="ef_${{col}}" value="${{String(v).replace(/"/g,'&quot;')}}">
-        </div>`;
-      }});
-      document.getElementById('editFields').innerHTML = html;
-      document.getElementById('editModal').style.display = 'flex';
-    }}
-
-    function saveEdit() {{
-      const data = {{}};
-      COLS.forEach(col => {{
-        if (col === PK_COL) return;
-        const el = document.getElementById('ef_' + col);
-        if (el) data[col] = el.value;
-      }});
-      fetch('/dbmanager/update', {{
-        method:'POST', headers:{{'Content-Type':'application/json'}},
-        body: JSON.stringify({{table:TABLE, pk_col:PK_COL, pk_val:editPK, data:data}})
-      }}).then(r=>r.json()).then(d=>{{
-        if(d.ok) {{ closeModal(); location.reload(); }}
-        else alert('Error: ' + d.error);
-      }});
-    }}
-
-    function showAddRow(tbl) {{
-      let html = '';
-      COLS.forEach(col => {{
-        if (col === PK_COL) return;
-        html += `<div class="form-group" style="margin-bottom:10px;">
-          <label>${{col}}</label>
-          <input id="af_${{col}}" placeholder="${{col}}">
-        </div>`;
-      }});
-      document.getElementById('addFields').innerHTML = html;
-      document.getElementById('addModal').style.display = 'flex';
-    }}
-
-    function saveAdd() {{
-      const data = {{}};
-      COLS.forEach(col => {{
-        if (col === PK_COL) return;
-        const el = document.getElementById('af_' + col);
-        if (el && el.value) data[col] = el.value;
-      }});
-      fetch('/dbmanager/add', {{
-        method:'POST', headers:{{'Content-Type':'application/json'}},
-        body: JSON.stringify({{table:TABLE, data:data}})
-      }}).then(r=>r.json()).then(d=>{{
-        if(d.ok) {{ closeModal(); location.reload(); }}
-        else alert('Error: ' + d.error);
-      }});
-    }}
-
-    function delRow(tbl, pk_col, pk_val) {{
-      if (!confirm('Delete this row? This cannot be undone.')) return;
-      fetch('/dbmanager/delete', {{
-        method:'POST', headers:{{'Content-Type':'application/json'}},
-        body: JSON.stringify({{table:tbl, pk_col:pk_col, pk_val:pk_val}})
-      }}).then(r=>r.json()).then(d=>{{
-        if(d.ok) {{ document.getElementById('row_'+pk_val)?.remove(); }}
-        else alert('Error: ' + d.error);
-      }});
-    }}
-
-    function closeModal() {{
-      document.getElementById('editModal').style.display = 'none';
-      document.getElementById('addModal').style.display = 'none';
-    }}
-    // Close on backdrop click
-    ['editModal','addModal'].forEach(id => {{
-      document.getElementById(id).addEventListener('click', e => {{
-        if (e.target.id === id) closeModal();
-      }});
-    }});
-    </script>
-    """
-    return page("DB Manager", content, "dbmanager")
-
-@app.route("/dbmanager/update", methods=["POST"])
+@app.route("/database/delete/<table>/<pk>")
 @login_required
-@role_required("admin")
-def dbmanager_update():
+@role_required("superadmin")
+def database_delete_row(table, pk):
+    if table not in DB_TABLES:
+        flash("Invalid table.","danger"); return redirect(url_for("database_view"))
+    c = get_cur()
+    c.execute(f"PRAGMA table_info({table})")
+    col_info = c.fetchall()
+    cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+    pk_col = cols[0] if cols else "rowid"
     try:
-        d = request.get_json()
-        table, pk_col, pk_val, data = d["table"], d["pk_col"], d["pk_val"], d["data"]
-        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
-        if not data: return jsonify({"ok":False,"error":"No data"})
-        conn = sqlite3.connect(DB_FILE)
-        sets = ", ".join([f"[{k}]=?" for k in data.keys()])
-        vals = list(data.values()) + [pk_val]
-        conn.execute(f"UPDATE [{table}] SET {sets} WHERE [{pk_col}]=?", vals)
-        conn.commit(); conn.close()
-        return jsonify({"ok":True})
+        c.execute(f"DELETE FROM {table} WHERE {pk_col}=?", (pk,))
+        get_db().commit()
+        flash(f"Row deleted from {table}.", "success")
     except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+        flash(f"Error: {e}", "danger")
+    return redirect(url_for("database_view", table=table))
 
-@app.route("/dbmanager/delete", methods=["POST"])
+
+@app.route("/database/download/<fmt>")
 @login_required
-@role_required("admin")
-def dbmanager_delete():
-    try:
-        d = request.get_json()
-        table, pk_col, pk_val = d["table"], d["pk_col"], d["pk_val"]
-        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute(f"DELETE FROM [{table}] WHERE [{pk_col}]=?", (pk_val,))
-        conn.commit(); conn.close()
-        return jsonify({"ok":True})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+@role_required("superadmin")
+def database_download(fmt):
+    if fmt == "db":
+        # Send the raw SQLite file
+        if TURSO_URL:
+            flash("Turso (cloud) DB: direct .db download not available. Use SQL dump instead.","warning")
+            return redirect(url_for("database_view"))
+        return send_file(DB_FILE, as_attachment=True,
+                         download_name="vehicle_loans.db",
+                         mimetype="application/octet-stream")
 
-@app.route("/dbmanager/add", methods=["POST"])
-@login_required
-@role_required("admin")
-def dbmanager_add():
-    try:
-        d = request.get_json()
-        table, data = d["table"], d["data"]
-        if table not in TABLES: return jsonify({"ok":False,"error":"Invalid table"})
-        if not data: return jsonify({"ok":False,"error":"No data"})
-        conn = sqlite3.connect(DB_FILE)
-        col_str = ", ".join([f"[{k}]" for k in data.keys()])
-        vals = list(data.values())
-        cur = conn.execute(
-            f"INSERT INTO [{table}] ({col_str}) VALUES ({','.join(['?']*len(vals))})", vals)
-        conn.commit()
-        new_id = cur.lastrowid
-        conn.close()
-        return jsonify({"ok":True,"id":new_id})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)})
+    elif fmt == "sql":
+        # Generate SQL dump
+        buf = io.StringIO()
+        if not TURSO_URL:
+            import sqlite3 as _sq
+            conn2 = _sq.connect(DB_FILE)
+            for line in conn2.iterdump():
+                buf.write(line + "\n")
+            conn2.close()
+        else:
+            # Turso — dump via SELECT
+            buf.write("-- SQL Dump (Turso cloud DB)\n")
+            c = get_cur()
+            for tbl in DB_TABLES:
+                try:
+                    c.execute(f"PRAGMA table_info({tbl})")
+                    col_info = c.fetchall()
+                    cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+                    c.execute(f"SELECT * FROM {tbl}")
+                    rows = c.fetchall()
+                    buf.write(f"\n-- Table: {tbl}\n")
+                    for row in rows:
+                        vals = [row[i] if isinstance(row,(list,tuple)) else row[col] for i,col in enumerate(cols)]
+                        escaped = ["NULL" if v is None else f"'{str(v).replace(chr(39), chr(39)+chr(39))}'" for v in vals]
+                        buf.write(f"INSERT INTO {tbl} ({','.join(cols)}) VALUES ({','.join(escaped)});\n")
+                except: pass
+        sql_bytes = buf.getvalue().encode("utf-8")
+        return send_file(io.BytesIO(sql_bytes), as_attachment=True,
+                         download_name="vehicle_loans_dump.sql",
+                         mimetype="text/plain")
 
-@app.route("/dbmanager/download_csv")
-@login_required
-@role_required("admin")
-def dbmanager_download_csv():
-    table  = request.args.get("table","LoanEntry")
-    search = request.args.get("q","")
-    if table not in TABLES: table = "LoanEntry"
-    rows, total, cols = db_get_rows(table, search, page=1, per_page=100000)
-    si = io.StringIO()
-    writer = csv.writer(si)
-    writer.writerow(cols)
-    for row in rows:
-        writer.writerow([row.get(c,"") for c in cols])
-    output = si.getvalue()
-    return Response(
-        output,
-        mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment;filename={table}_{date.today()}.csv"}
-    )
+    elif fmt == "zip":
+        # All tables as CSVs in a ZIP
+        zip_buf = io.BytesIO()
+        c = get_cur()
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for tbl in DB_TABLES:
+                try:
+                    c.execute(f"PRAGMA table_info({tbl})")
+                    col_info = c.fetchall()
+                    cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+                    c.execute(f"SELECT * FROM {tbl}")
+                    rows = c.fetchall()
+                    csv_buf = io.StringIO()
+                    writer = csv.writer(csv_buf)
+                    writer.writerow(cols)
+                    for row in rows:
+                        vals = [row[i] if isinstance(row,(list,tuple)) else row[col] for i,col in enumerate(cols)]
+                        writer.writerow(vals)
+                    zf.writestr(f"{tbl}.csv", csv_buf.getvalue())
+                except: pass
+        zip_buf.seek(0)
+        return send_file(zip_buf, as_attachment=True,
+                         download_name="vehicle_loans_all_tables.zip",
+                         mimetype="application/zip")
 
-@app.route("/dbmanager/download_zip")
-@login_required
-@role_required("admin")
-def dbmanager_download_zip():
-    """Export ALL tables as CSV files inside a ZIP."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for table in TABLES:
-            try:
-                rows, _, cols = db_get_rows(table, page=1, per_page=99999)
-                si = io.StringIO()
-                writer = csv.writer(si)
-                writer.writerow(cols)
-                for row in rows:
-                    writer.writerow([row.get(c,"") for c in cols])
-                zf.writestr(f"{table}.csv", si.getvalue())
-            except Exception as e:
-                zf.writestr(f"{table}_error.txt", str(e))
-    buf.seek(0)
-    return send_file(
-        buf, as_attachment=True,
-        download_name=f"TFC_Database_{date.today()}.zip",
-        mimetype="application/zip"
-    )
+    elif fmt == "csv":
+        tbl = request.args.get("table", DB_TABLES[0])
+        if tbl not in DB_TABLES: tbl = DB_TABLES[0]
+        c = get_cur()
+        c.execute(f"PRAGMA table_info({tbl})")
+        col_info = c.fetchall()
+        cols = [r[1] if isinstance(r,(list,tuple)) else r["name"] for r in col_info]
+        c.execute(f"SELECT * FROM {tbl}")
+        rows = c.fetchall()
+        csv_buf = io.StringIO()
+        writer = csv.writer(csv_buf)
+        writer.writerow(cols)
+        for row in rows:
+            vals = [row[i] if isinstance(row,(list,tuple)) else row[col] for i,col in enumerate(cols)]
+            writer.writerow(vals)
+        return send_file(io.BytesIO(csv_buf.getvalue().encode("utf-8")),
+                         as_attachment=True,
+                         download_name=f"{tbl}.csv",
+                         mimetype="text/csv")
 
-@app.route("/uploads/<path:filename>")
-@login_required
-def uploaded_file(filename):
-    return send_file(os.path.join(UPLOAD_FOLDER, filename))
+    flash("Unknown format.", "danger")
+    return redirect(url_for("database_view"))
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Users ──────────────────────────────────────────────────────────────────────
 init_db()
 
 if __name__ == "__main__":
