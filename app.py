@@ -135,6 +135,51 @@ def compute_emi_amount(amt, rate_dec, tenure):
 def compute_total_due(amt, rate_dec, tenure):
     return round(amt + (amt * rate_dec * (tenure / 12.0)), 2)
 
+def plan_emi_schedule(amt, rate_dec, tenure, custom_emi=None):
+    """Build the EMI schedule plan: a list of installment amounts.
+
+    Normally returns `tenure` equal installments (computed EMI).
+    If `custom_emi` (a rounded EMI amount) is provided, the schedule uses
+    that amount for `tenure` installments and adjusts the difference
+    between (custom_emi * tenure) and the actual total due:
+      - If money is LEFT OVER (custom_emi*tenure < total_due): an extra
+        final installment (#tenure+1) is added for the leftover amount.
+      - If custom_emi*tenure OVERSHOOTS total_due: the last installment
+        is reduced so the total still equals total_due exactly.
+
+    Returns: (amounts: list[float], total_due: float, computed_emi: float, leftover: float)
+    """
+    total_due = compute_total_due(amt, rate_dec, tenure)
+    computed_emi = compute_emi_amount(amt, rate_dec, tenure)
+
+    if custom_emi is None or float(custom_emi) <= 0:
+        amounts = [computed_emi] * tenure
+        # tiny rounding residue on the last installment so sum == total_due exactly
+        residue = round(total_due - sum(amounts), 2)
+        if abs(residue) >= 0.01:
+            amounts[-1] = round(amounts[-1] + residue, 2)
+        return amounts, total_due, computed_emi, 0.0
+
+    custom_emi = round(float(custom_emi), 2)
+    amounts = [custom_emi] * tenure
+    leftover = round(total_due - (custom_emi * tenure), 2)
+
+    if leftover > 0.005:
+        # extra final installment for the remaining balance
+        amounts.append(leftover)
+    elif leftover < -0.005:
+        # custom EMI overshoots — trim the last installment
+        amounts[-1] = round(amounts[-1] + leftover, 2)
+        if amounts[-1] <= 0:
+            # if trimming would zero/negate the last EMI, drop it and
+            # spread the remainder back across the prior installment
+            removed = amounts.pop()
+            if amounts:
+                amounts[-1] = round(amounts[-1] + removed, 2)
+
+    return amounts, total_due, computed_emi, leftover
+
+
 def fmt_inr(v):
     try: return f"₹{float(v):,.2f}"
     except: return "₹0.00"
@@ -322,7 +367,8 @@ def init_db():
         guarantor_mobile TEXT,
         is_reloan INTEGER DEFAULT 0,
         reloan_ref TEXT,
-        remarks TEXT
+        remarks TEXT,
+        custom_emi_amount REAL
     );
     CREATE TABLE IF NOT EXISTS Customers (
         customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,6 +423,7 @@ def init_db():
         "ALTER TABLE EMI ADD COLUMN bill_number TEXT",
         "ALTER TABLE LoanEntry ADD COLUMN remarks TEXT",
         "ALTER TABLE LoanEntry ADD COLUMN attachment TEXT",
+        "ALTER TABLE LoanEntry ADD COLUMN custom_emi_amount REAL",
     ]:
         try: cur.execute(m)
         except: pass
@@ -425,7 +472,7 @@ def create_loan(ln, cname, cmobile, caddr, cloc,
                 vtype, vnum, vmodel, eng, chas, vcol,
                 amt, rate_raw, tenure, sdate, cemail="",
                 gname="", gaddr="", gmob="", is_reloan=0, reloan_ref="",
-                remarks="", attachment=""):
+                remarks="", attachment="", custom_emi_amount=None):
     r = normalize_interest(rate_raw)
     if r is None: raise ValueError("Invalid interest rate")
     c = get_cur()
@@ -434,32 +481,58 @@ def create_loan(ln, cname, cmobile, caddr, cloc,
                   vehicle_type,vehicle_number,vehicle_model,engine_number,chassis_number,vehicle_colour,
                   loan_amount,interest_rate,tenure,start_date,status,created_at,
                   attachment,customer_email,guarantor_name,guarantor_address,guarantor_mobile,
-                  is_reloan,reloan_ref,remarks)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  is_reloan,reloan_ref,remarks,custom_emi_amount)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (ln,cname,cmobile,caddr,cloc,
                vtype,vnum,vmodel,eng,chas,vcol,
                float(amt),float(r),int(tenure),sdate,"PendingApproval",
                datetime.now(timezone.utc).isoformat(),
                attachment or None,cemail,gname,gaddr,gmob,int(is_reloan),reloan_ref,
-               remarks))
+               remarks,
+               float(custom_emi_amount) if custom_emi_amount not in (None,"","0") else None))
     get_db().commit(); return c.lastrowid
 
-def approve_loan(loan_id):
+def approve_loan(loan_id, override_emi=None):
     c = get_cur()
     c.execute("SELECT * FROM LoanEntry WHERE id=?", (loan_id,))
     loan = c.fetchone()
     if not loan: raise ValueError("Loan not found")
     if loan["status"] != "PendingApproval": raise ValueError("Loan is not pending approval")
-    emi_amt = compute_emi_amount(float(loan["loan_amount"]), float(loan["interest_rate"]), int(loan["tenure"]))
+
+    amt   = float(loan["loan_amount"])
+    rate  = float(loan["interest_rate"])
+    tenure = int(loan["tenure"])
+
+    # Priority: explicit admin override > stored custom EMI from application > auto-computed
+    custom_emi = None
+    if override_emi not in (None, "", 0, "0"):
+        custom_emi = float(override_emi)
+    else:
+        try:
+            stored = loan["custom_emi_amount"]
+            if stored: custom_emi = float(stored)
+        except (IndexError, KeyError, TypeError):
+            pass
+
+    amounts, total_due, computed_emi, leftover = plan_emi_schedule(amt, rate, tenure, custom_emi)
+    emi_amt_for_summary = custom_emi if custom_emi else computed_emi
+
     now = datetime.now(timezone.utc).isoformat()
     c.execute("INSERT OR REPLACE INTO Customers (loan_id,name,vehicle_type,loan_amount,emi_amount,status,created_at) VALUES (?,?,?,?,?,?,?)",
-              (loan_id, loan["customer_name"], loan["vehicle_type"], loan["loan_amount"], emi_amt, "Active", now))
+              (loan_id, loan["customer_name"], loan["vehicle_type"], loan["loan_amount"], emi_amt_for_summary, "Active", now))
     try: sd = parse_date(loan["start_date"])
     except: sd = date.today()
-    for i in range(1, int(loan["tenure"]) + 1):
+
+    for idx, installment_amt in enumerate(amounts, start=1):
         c.execute("INSERT INTO EMI (loan_id,installment_no,due_date,emi_amount,status,paid_at,amount_paid,remaining_amount,extra_interest,bill_number) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                  (loan_id, i, add_months(sd, i-1).isoformat(), emi_amt, "Pending", None, 0.0, emi_amt, 0.0, None))
-    c.execute("UPDATE LoanEntry SET status='Approved' WHERE id=?", (loan_id,))
+                  (loan_id, idx, add_months(sd, idx-1).isoformat(), installment_amt, "Pending", None, 0.0, installment_amt, 0.0, None))
+
+    # Persist the EMI amount actually used (for record-keeping / display)
+    if custom_emi:
+        c.execute("UPDATE LoanEntry SET status='Approved', custom_emi_amount=? WHERE id=?", (custom_emi, loan_id))
+    else:
+        c.execute("UPDATE LoanEntry SET status='Approved' WHERE id=?", (loan_id,))
+
     get_db().commit(); _notify_approval(dict(loan))
 
 def reject_loan(loan_id, reason):
@@ -1594,7 +1667,8 @@ def add_loan():
                 f.get("customer_email",""),
                 f.get("guarantor_name",""), f.get("guarantor_address",""), f.get("guarantor_mobile",""),
                 1 if f.get("is_reloan")=="yes" else 0, f.get("reloan_ref",""),
-                f.get("remarks",""), attachment
+                f.get("remarks",""), attachment,
+                f.get("custom_emi_amount","") if f.get("emi_mode")=="manual" else None
             )
             flash("Loan submitted for approval.","success")
             return redirect(url_for("loans"))
@@ -1630,6 +1704,17 @@ def add_loan():
         <div class="form-group">
           <label>Tenure (Months) *</label>
           <input type="number" name="tenure" min="1" max="360" required oninput="calcDue()">
+        </div>
+        <div class="form-group">
+          <label>EMI Calculation *</label>
+          <select name="emi_mode" id="emi_mode" onchange="toggleEmiMode(this.value)">
+            <option value="auto">Auto (from Interest Rate)</option>
+            <option value="manual">Manual (I'll set a rounded EMI)</option>
+          </select>
+        </div>
+        <div class="form-group" id="custom_emi_group" style="display:none;">
+          <label>Custom EMI Amount (₹) <span style="font-size:10px;color:var(--muted);">(rounded — leftover becomes a final installment)</span></label>
+          <input type="number" name="custom_emi_amount" id="custom_emi_amount" min="1" step="1" oninput="calcDue()" placeholder="e.g. 1250">
         </div>
         <div class="form-group">
           <label>Is Reloan?</label>
@@ -1756,6 +1841,7 @@ def add_loan():
           <div class="due-item"><div class="lbl">Tenure</div><div class="val" id="dp_tenure">—</div></div>
           <div class="due-item"><div class="lbl">Rate p.a.</div><div class="val" id="dp_rate">—</div></div>
         </div>
+        <div id="dp_schedule_note" style="display:none;margin-top:12px;padding:10px 12px;background:rgba(255,255,255,.15);border-radius:8px;font-size:12.5px;line-height:1.6;"></div>
       </div>
 
       <div style="margin-top:18px;display:flex;gap:10px;flex-wrap:wrap;">
@@ -1814,20 +1900,46 @@ def add_loan():
         }});
     }}
     function fmt(v){{return '₹'+parseFloat(v).toLocaleString('en-IN',{{minimumFractionDigits:2,maximumFractionDigits:2}});}}
+    function toggleEmiMode(v){{
+      document.getElementById('custom_emi_group').style.display = (v==='manual')?'block':'none';
+      calcDue();
+    }}
     function calcDue(){{
       const amt=parseFloat(document.querySelector('[name=loan_amount]').value)||0;
       const rate=parseFloat(document.querySelector('[name=interest_rate]').value)||0;
       const tenure=parseInt(document.querySelector('[name=tenure]').value)||0;
+      const mode=document.getElementById('emi_mode').value;
+      const customEmi=parseFloat(document.getElementById('custom_emi_amount').value)||0;
       const p=document.getElementById('due_preview');
+      const note=document.getElementById('dp_schedule_note');
       if(amt>0&&rate>0&&tenure>0){{
         const interest=amt*(rate/100)*(tenure/12);
         const total=amt+interest; const emi=total/tenure;
         document.getElementById('dp_principal').textContent=fmt(amt);
         document.getElementById('dp_interest').textContent=fmt(interest);
         document.getElementById('dp_total').textContent=fmt(total);
-        document.getElementById('dp_emi').textContent=fmt(emi);
         document.getElementById('dp_tenure').textContent=tenure+' months';
         document.getElementById('dp_rate').textContent=rate+'%';
+
+        if(mode==='manual' && customEmi>0){{
+          document.getElementById('dp_emi').textContent=fmt(customEmi)+' (custom)';
+          const fullTotal = customEmi*tenure;
+          const leftover = Math.round((total-fullTotal)*100)/100;
+          if(leftover > 0.005){{
+            note.style.display='block';
+            note.innerHTML = `📅 Schedule: <b>${{tenure}}</b> installments of <b>${{fmt(customEmi)}}</b> + a final <b>installment #${{tenure+1}}</b> of <b>${{fmt(leftover)}}</b> (leftover balance).`;
+          }} else if(leftover < -0.005){{
+            const lastEmi = customEmi + leftover;
+            note.style.display='block';
+            note.innerHTML = `📅 Schedule: <b>${{tenure-1}}</b> installments of <b>${{fmt(customEmi)}}</b> + final installment #${{tenure}} reduced to <b>${{fmt(lastEmi)}}</b> (since ${{fmt(customEmi)}} × ${{tenure}} exceeds total due).`;
+          }} else {{
+            note.style.display='block';
+            note.innerHTML = `📅 Schedule: <b>${{tenure}}</b> installments of <b>${{fmt(customEmi)}}</b> — divides exactly, no adjustment needed.`;
+          }}
+        }} else {{
+          document.getElementById('dp_emi').textContent=fmt(emi);
+          note.style.display='none';
+        }}
         p.style.display='block';
       }}else{{p.style.display='none';}}
     }}
@@ -1860,51 +1972,113 @@ def approval():
         lid = int(request.form["loan_id"]); action = request.form["action"]
         try:
             if action == "approve":
-                approve_loan(lid); flash("Loan approved!","success")
+                emi_override = request.form.get("emi_amount","").strip()
+                approve_loan(lid, override_emi=emi_override or None)
+                flash("Loan approved!","success")
             else:
                 reject_loan(lid, request.form.get("reason","No reason given"))
                 flash("Loan rejected.","success")
         except Exception as e:
             flash(str(e),"danger")
+        return redirect(url_for("approval", q=request.args.get("q","")))
+
     q = request.args.get("q","")
     ll = list_pending_loans(q)
-    rows = ""
+    cards = ""
     for l in ll:
         amt = float(l["loan_amount"]); rate = float(l["interest_rate"]); t = int(l["tenure"])
         emi_amt = compute_emi_amount(amt, rate, t)
         total_due = compute_total_due(amt, rate, t)
-        rows += f"""<tr>
-          <td><b>{l['loan_number']}</b></td><td>{l['customer_name']}</td>
-          <td>{l.get('customer_mobile','')}</td><td>{l['vehicle_type']}</td>
-          <td>₹{amt:,.2f}</td>
-          <td><b style="color:var(--accent)">₹{total_due:,.2f}</b></td>
-          <td><b>₹{emi_amt:,.2f}</b></td><td>{l['start_date']}</td>
-          <td>
-            <form method="POST" style="display:inline">
-              <input type="hidden" name="loan_id" value="{l['id']}">
-              <input type="hidden" name="action" value="approve">
-              <button class="btn btn-success btn-sm">✅</button>
-            </form>
-            <form method="POST" style="display:inline;margin-left:4px;" onsubmit="return getReason(this)">
-              <input type="hidden" name="loan_id" value="{l['id']}">
-              <input type="hidden" name="action" value="reject">
-              <input type="hidden" name="reason" class="reason_inp">
-              <button type="submit" class="btn btn-danger btn-sm">❌</button>
-            </form>
-          </td>
-        </tr>"""
+        try:
+            stored_custom = float(l["custom_emi_amount"]) if l["custom_emi_amount"] else 0
+        except (IndexError, KeyError, TypeError):
+            stored_custom = 0
+        prefill_emi = stored_custom or emi_amt
+        custom_note = ""
+        if stored_custom:
+            custom_note = f'<div class="alert alert-info" style="margin:8px 0;font-size:12px;padding:8px 10px;">📝 Customer requested EMI of <b>₹{stored_custom:,.2f}</b> at application time. You can edit it below before approving.</div>'
+
+        cards += f"""
+        <div class="card" data-amt="{amt}" data-rate="{rate}" data-tenure="{t}" data-total="{total_due}" data-emi="{emi_amt}">
+          <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:8px;">
+            <div>
+              <b style="font-size:15px;color:var(--accent);">{l['loan_number']}</b> — {l['customer_name']}
+              <div style="font-size:12px;color:var(--muted);margin-top:2px;">
+                📱 {l.get('customer_mobile','')} &nbsp;|&nbsp; 🚗 {l['vehicle_type']} &nbsp;|&nbsp; 📅 Start: {l['start_date']}
+              </div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:12px;color:var(--muted);">Loan Amount</div>
+              <div style="font-size:17px;font-weight:700;">₹{amt:,.2f}</div>
+            </div>
+          </div>
+
+          <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px;">
+            <div class="kpi" style="padding:8px 10px;"><div class="val" style="font-size:15px;">{rate*100:.1f}%</div><div class="lbl">Rate p.a.</div></div>
+            <div class="kpi" style="padding:8px 10px;"><div class="val" style="font-size:15px;">{t}m</div><div class="lbl">Tenure</div></div>
+            <div class="kpi" style="padding:8px 10px;"><div class="val" style="font-size:15px;">₹{total_due:,.2f}</div><div class="lbl">Total Due</div></div>
+            <div class="kpi" style="padding:8px 10px;"><div class="val" style="font-size:15px;">₹{emi_amt:,.2f}</div><div class="lbl">Calculated EMI</div></div>
+          </div>
+
+          {custom_note}
+
+          <form method="POST" class="approve-form" onsubmit="return true;">
+            <input type="hidden" name="loan_id" value="{l['id']}">
+            <input type="hidden" name="action" value="approve">
+            <div class="form-grid" style="align-items:end;">
+              <div class="form-group">
+                <label>EMI Amount to Approve (₹) <span style="font-size:10px;color:var(--muted);">(edit if rounding is needed)</span></label>
+                <input type="number" name="emi_amount" class="emi-input" value="{prefill_emi:.2f}" min="1" step="0.01" oninput="previewSchedule(this)">
+              </div>
+              <div class="form-group">
+                <div class="schedule-note" style="font-size:12.5px;color:var(--muted);line-height:1.6;padding:8px 10px;background:var(--surface2);border-radius:8px;min-height:42px;"></div>
+              </div>
+            </div>
+            <div style="margin-top:10px;display:flex;gap:8px;">
+              <button type="submit" class="btn btn-success btn-sm">✅ Approve with this EMI</button>
+            </div>
+          </form>
+          <form method="POST" onsubmit="return getReason(this)" style="margin-top:6px;">
+            <input type="hidden" name="loan_id" value="{l['id']}">
+            <input type="hidden" name="action" value="reject">
+            <input type="hidden" name="reason" class="reason_inp">
+            <button type="submit" class="btn btn-danger btn-sm">❌ Reject</button>
+          </form>
+        </div>"""
+
     content = f"""
     <h1>✅ Loan Approval</h1>
     <form method="GET" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;">
       <input name="q" value="{q}" placeholder="Search…" style="max-width:240px;">
       <button class="btn btn-primary btn-sm">Search</button>
     </form>
-    <div class="card"><div class="table-wrap"><table>
-      <tr><th>Loan #</th><th>Customer</th><th>Mobile</th><th>Type</th>
-          <th>Loan Amt</th><th>Total Due</th><th>EMI/mo</th><th>Start</th><th>Action</th></tr>
-      {rows or '<tr><td colspan="9" style="text-align:center;color:var(--muted);">No pending loans</td></tr>'}
-    </table></div></div>
+    {cards or '<div class="card"><p style="text-align:center;color:var(--muted);">No pending loans</p></div>'}
     <script>
+    function fmtINR(v){{return '₹'+v.toLocaleString('en-IN',{{minimumFractionDigits:2,maximumFractionDigits:2}});}}
+    function previewSchedule(input){{
+      const card = input.closest('.card');
+      const amt = parseFloat(card.dataset.amt);
+      const rate = parseFloat(card.dataset.rate);
+      const tenure = parseInt(card.dataset.tenure);
+      const total = parseFloat(card.dataset.total);
+      const calcEmi = parseFloat(card.dataset.emi);
+      const emi = parseFloat(input.value)||0;
+      const note = card.querySelector('.schedule-note');
+      if(emi<=0){{ note.innerHTML='Enter an EMI amount to preview the schedule.'; return; }}
+      const fullTotal = Math.round(emi*tenure*100)/100;
+      const leftover = Math.round((total-fullTotal)*100)/100;
+      if(Math.abs(emi-calcEmi) < 0.01){{
+        note.innerHTML = `📅 ${{tenure}} installments of ${{fmtINR(emi)}} (matches calculated EMI exactly).`;
+      }} else if(leftover > 0.005){{
+        note.innerHTML = `📅 ${{tenure}} installments of ${{fmtINR(emi)}} + <b>final installment #${{tenure+1}}</b> of <b>${{fmtINR(leftover)}}</b> (leftover balance).`;
+      }} else if(leftover < -0.005){{
+        const lastEmi = emi + leftover;
+        note.innerHTML = `📅 ${{tenure-1}} installments of ${{fmtINR(emi)}} + final installment #${{tenure}} reduced to <b>${{fmtINR(lastEmi)}}</b> (EMI × tenure exceeds total due).`;
+      }} else {{
+        note.innerHTML = `📅 ${{tenure}} installments of ${{fmtINR(emi)}} — divides exactly, no adjustment needed.`;
+      }}
+    }}
+    document.querySelectorAll('.emi-input').forEach(previewSchedule);
     function getReason(form){{
       const r=prompt('Rejection reason:'); if(!r) return false;
       form.querySelector('.reason_inp').value=r; return true;
