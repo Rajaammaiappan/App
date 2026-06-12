@@ -11,7 +11,7 @@ Changes v3:
   - All previous features preserved
 """
 
-import os, math, sqlite3, hashlib, secrets, calendar, smtplib, base64, io, zipfile, csv
+import os, math, sqlite3, hashlib, secrets, calendar, smtplib, base64, io, zipfile, csv, re
 import requests as http_req
 from datetime import date, datetime, timezone, timedelta
 from functools import wraps
@@ -283,7 +283,8 @@ def init_db():
         guarantor_address TEXT,
         guarantor_mobile TEXT,
         is_reloan INTEGER DEFAULT 0,
-        reloan_ref TEXT
+        reloan_ref TEXT,
+        remarks TEXT
     );
     CREATE TABLE IF NOT EXISTS Customers (
         customer_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -337,7 +338,7 @@ def init_db():
         "ALTER TABLE LoanEntry ADD COLUMN reloan_ref TEXT",
         "ALTER TABLE EMI ADD COLUMN bill_number TEXT",
         "ALTER TABLE LoanEntry ADD COLUMN remarks TEXT",
-        "ALTER TABLE LoanEntry ADD COLUMN attachment_path TEXT",
+        "ALTER TABLE LoanEntry ADD COLUMN attachment TEXT",
     ]:
         try: cur.execute(m)
         except: pass
@@ -366,7 +367,7 @@ def create_loan(ln, cname, cmobile, caddr, cloc,
                 vtype, vnum, vmodel, eng, chas, vcol,
                 amt, rate_raw, tenure, sdate, cemail="",
                 gname="", gaddr="", gmob="", is_reloan=0, reloan_ref="",
-                remarks="", attachment_path=""):
+                remarks="", attachment=""):
     r = normalize_interest(rate_raw)
     if r is None: raise ValueError("Invalid interest rate")
     c = get_cur()
@@ -375,14 +376,14 @@ def create_loan(ln, cname, cmobile, caddr, cloc,
                   vehicle_type,vehicle_number,vehicle_model,engine_number,chassis_number,vehicle_colour,
                   loan_amount,interest_rate,tenure,start_date,status,created_at,
                   attachment,customer_email,guarantor_name,guarantor_address,guarantor_mobile,
-                  is_reloan,reloan_ref,remarks,attachment_path)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  is_reloan,reloan_ref,remarks)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
               (ln,cname,cmobile,caddr,cloc,
                vtype,vnum,vmodel,eng,chas,vcol,
                float(amt),float(r),int(tenure),sdate,"PendingApproval",
                datetime.now(timezone.utc).isoformat(),
-               None,cemail,gname,gaddr,gmob,int(is_reloan),reloan_ref,
-               remarks,attachment_path))
+               attachment or None,cemail,gname,gaddr,gmob,int(is_reloan),reloan_ref,
+               remarks))
     get_db().commit(); return c.lastrowid
 
 def approve_loan(loan_id):
@@ -1006,6 +1007,53 @@ tr.row-paid td{opacity:.65;}
   /* Alert messages */
   .alert{font-size:12px;padding:8px 10px;}
 }
+/* ── CHATBOT WIDGET ── */
+.chatbot-fab{
+  position:fixed;bottom:20px;right:20px;z-index:500;
+  width:56px;height:56px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#fff;border:none;font-size:24px;cursor:pointer;
+  box-shadow:0 4px 14px rgba(26,79,173,.4);
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .15s ease,box-shadow .15s ease;
+}
+.chatbot-fab:hover{transform:scale(1.08);box-shadow:0 6px 18px rgba(26,79,173,.5);}
+.chatbot-window{
+  position:fixed;bottom:88px;right:20px;z-index:500;
+  width:360px;max-width:92vw;height:480px;max-height:72vh;
+  background:var(--surface);border-radius:14px;
+  box-shadow:0 10px 40px rgba(0,0,0,.25);
+  display:none;flex-direction:column;overflow:hidden;
+  border:1px solid var(--border);
+}
+.chatbot-window.open{display:flex;}
+.chatbot-header{
+  background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;
+  padding:12px 14px;display:flex;justify-content:space-between;align-items:center;
+  font-size:14px;font-weight:700;
+}
+.chatbot-header button{background:none;border:none;color:#fff;font-size:18px;cursor:pointer;padding:2px 6px;}
+.chatbot-body{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:8px;background:var(--surface2);}
+.chat-msg{max-width:88%;padding:8px 12px;border-radius:10px;font-size:13px;line-height:1.45;white-space:pre-wrap;}
+.chat-msg.bot{background:#fff;border:1px solid var(--border);align-self:flex-start;border-bottom-left-radius:2px;}
+.chat-msg.user{background:var(--accent);color:#fff;align-self:flex-end;border-bottom-right-radius:2px;}
+.chat-suggestions{display:flex;gap:6px;flex-wrap:wrap;padding:0 12px 8px;background:var(--surface2);}
+.chat-suggestions button{
+  background:#fff;border:1px solid var(--border);border-radius:14px;
+  padding:5px 10px;font-size:11px;cursor:pointer;color:var(--accent);
+  transition:.15s;
+}
+.chat-suggestions button:hover{background:var(--accent);color:#fff;}
+.chatbot-input-row{display:flex;gap:6px;padding:10px;border-top:1px solid var(--border);background:var(--surface);}
+.chatbot-input-row input{flex:1;padding:9px 10px;font-size:13px;min-height:auto;}
+.chatbot-input-row button{
+  background:var(--accent);color:#fff;border:none;border-radius:8px;
+  padding:0 14px;font-size:14px;cursor:pointer;
+}
+@media(max-width:480px){
+  .chatbot-window{width:94vw;right:3vw;bottom:80px;height:65vh;}
+  .chatbot-fab{bottom:14px;right:14px;}
+}
 </style>
 """
 
@@ -1032,6 +1080,71 @@ def _nav_links(role, active):
     if role in ("admin","superadmin"): links += lnk("/users","⚙️","Users","users")
     if can_db:      links += lnk("/database","🗄️","Database","database")
     return links
+
+CHATBOT_JS = """<script>
+function tfcChatToggle(){
+  const win = document.getElementById('tfcChatWindow');
+  win.classList.toggle('open');
+  if(win.classList.contains('open')){
+    if(!document.getElementById('tfcChatBody').dataset.greeted){
+      tfcGreet();
+      document.getElementById('tfcChatBody').dataset.greeted='1';
+    }
+    document.getElementById('tfcChatInput')?.focus();
+  }
+}
+function tfcGreet(){
+  const body = document.getElementById('tfcChatBody');
+  const div = document.createElement('div');
+  div.className = 'chat-msg bot';
+  div.textContent = '⏳ ...';
+  body.appendChild(div);
+  fetch('/api/chatbot', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message: '__greet__'})
+  }).then(r=>r.json()).then(data=>{
+    div.textContent = data.reply || 'Hello!';
+    body.scrollTop = body.scrollHeight;
+  }).catch(()=>{ div.textContent = 'Hello! Ask me about your loans, EMIs, or customers.'; });
+}
+function tfcAddMsg(who, text){
+  const body = document.getElementById('tfcChatBody');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + who;
+  div.textContent = text;
+  body.appendChild(div);
+  body.scrollTop = body.scrollHeight;
+}
+function tfcAsk(text){
+  document.getElementById('tfcChatInput').value = text;
+  document.getElementById('tfcChatForm').requestSubmit();
+}
+function tfcSendMsg(e){
+  e.preventDefault();
+  const input = document.getElementById('tfcChatInput');
+  const msg = input.value.trim();
+  if(!msg) return false;
+  tfcAddMsg('user', msg);
+  input.value='';
+  const body = document.getElementById('tfcChatBody');
+  const thinking = document.createElement('div');
+  thinking.className = 'chat-msg bot';
+  thinking.textContent = '⏳ Thinking...';
+  body.appendChild(thinking);
+  body.scrollTop = body.scrollHeight;
+  fetch('/api/chatbot', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message: msg})
+  }).then(r=>r.json()).then(data=>{
+    thinking.textContent = data.reply || 'No response.';
+    body.scrollTop = body.scrollHeight;
+  }).catch(err=>{
+    thinking.textContent = '❌ Error contacting server. Please try again.';
+  });
+  return false;
+}
+</script>"""
+
 
 def page(title, content, active=""):
     username = session.get("username","")
@@ -1097,6 +1210,27 @@ document.querySelectorAll('.sidebar nav a').forEach(a=>{{
   }});
 }});
 </script>
+<!-- Chatbot Widget -->
+<button class="chatbot-fab" onclick="tfcChatToggle()" title="Ask Thendralla">💬</button>
+<div class="chatbot-window" id="tfcChatWindow">
+  <div class="chatbot-header">
+    <span>🤖 Thendralla — Loan Assistant</span>
+    <button onclick="tfcChatToggle()">✕</button>
+  </div>
+  <div id="tfcChatBody" class="chatbot-body"></div>
+  <div class="chat-suggestions">
+    <button onclick="tfcAsk('How many loans do I have')">📊 My Loans</button>
+    <button onclick="tfcAsk('Today summary')">📅 Today</button>
+    <button onclick="tfcAsk('Upcoming EMI')">⏳ Upcoming EMI</button>
+    <button onclick="tfcAsk('Overdue loans')">🔴 Overdue</button>
+    <button onclick="tfcAsk('This week insights')">📈 This Week</button>
+  </div>
+  <form id="tfcChatForm" class="chatbot-input-row" onsubmit="return tfcSendMsg(event)">
+    <input id="tfcChatInput" placeholder="Ask Thendralla anything..." autocomplete="off">
+    <button type="submit">➤</button>
+  </form>
+</div>
+{CHATBOT_JS}
 </body>
 </html>"""
 
@@ -1371,13 +1505,13 @@ def add_loan():
             flash("Customer address is mandatory.","danger")
             return redirect(url_for("add_loan"))
         # Handle file upload
-        attachment_path = ""
+        attachment = ""
         file = request.files.get("attachment")
         if file and file.filename and allowed_file(file.filename):
             fn = secure_filename(f"{f['loan_number']}_{file.filename}")
             fpath = os.path.join(UPLOAD_FOLDER, fn)
             file.save(fpath)
-            attachment_path = fpath
+            attachment = fpath
         try:
             create_loan(
                 f["loan_number"], f["customer_name"], mob,
@@ -1388,7 +1522,7 @@ def add_loan():
                 f.get("customer_email",""),
                 f.get("guarantor_name",""), f.get("guarantor_address",""), f.get("guarantor_mobile",""),
                 1 if f.get("is_reloan")=="yes" else 0, f.get("reloan_ref",""),
-                f.get("remarks",""), attachment_path
+                f.get("remarks",""), attachment
             )
             flash("Loan submitted for approval.","success")
             return redirect(url_for("loans"))
@@ -2305,6 +2439,234 @@ def api_monthly():
 def api_breakdown():
     bd = get_loan_type_breakdown()
     return jsonify({"labels":[r["vehicle_type"] for r in bd],"data":[r["cnt"] for r in bd]})
+
+# ── CHATBOT ────────────────────────────────────────────────────────────────────
+def _chatbot_search_loans(term):
+    q = f"%{term}%"
+    c = get_cur()
+    c.execute("""SELECT * FROM LoanEntry
+                 WHERE loan_number LIKE ? OR customer_name LIKE ? OR customer_mobile LIKE ?
+                    OR vehicle_number LIKE ? OR vehicle_model LIKE ?
+                    OR engine_number LIKE ? OR chassis_number LIKE ?
+                    OR guarantor_name LIKE ? OR guarantor_mobile LIKE ?
+                 ORDER BY created_at DESC LIMIT 6""",
+              (q,q,q,q,q,q,q,q,q))
+    return [dict(r) for r in c.fetchall()]
+
+def _na(val, fallback="-"):
+    return val if val not in (None, "", "None") else fallback
+
+def _chatbot_loan_summary(loan, detailed=False):
+    lid = loan["id"]
+    emis = get_emis_for_loan(lid)
+    total = len(emis)
+    paid  = len([e for e in emis if e["status"]=="Paid"])
+    outstanding = sum(float(e.get("remaining_amount") or e["emi_amount"]) for e in emis if e["status"]!="Paid")
+    next_due = next((e for e in emis if e["status"] in ("Pending","Partial","Overdue")), None)
+
+    lines = []
+    lines.append(f"📋 Loan: {loan['loan_number']}  ({loan['status']})")
+    lines.append(f"👤 Customer: {_na(loan.get('customer_name'))}  |  📱 {_na(loan.get('customer_mobile'))}")
+    lines.append(f"🚗 Vehicle: {_na(loan.get('vehicle_type'))} — {_na(loan.get('vehicle_number'))} ({_na(loan.get('vehicle_model'))})")
+    lines.append(f"💰 Loan Amount: {fmt_inr(loan.get('loan_amount',0))}  |  Rate: {float(loan.get('interest_rate',0))*100:.1f}%  |  Tenure: {loan.get('tenure','-')}m")
+    if total:
+        lines.append(f"💳 EMIs: {paid}/{total} paid  |  Outstanding: {fmt_inr(outstanding)}")
+        if next_due:
+            rem = float(next_due.get("remaining_amount") or next_due["emi_amount"])
+            lines.append(f"⏳ Next Due: Installment #{next_due['installment_no']} on {next_due['due_date']} — {fmt_inr(rem)} ({next_due['status']})")
+    else:
+        lines.append("💳 EMI schedule not generated yet (loan pending approval).")
+    if detailed:
+        if loan.get("customer_address"): lines.append(f"🏠 Address: {loan['customer_address']}")
+        if loan.get("guarantor_name"): lines.append(f"🛡️ Guarantor: {loan['guarantor_name']} ({_na(loan.get('guarantor_mobile'))})")
+        if loan.get("remarks"): lines.append(f"📝 Remarks: {loan['remarks']}")
+    return "\n".join(lines)
+
+
+def _chatbot_intent(msg, low):
+    """Return a reply string for analytical / conversational intents, or None if it's a search query."""
+    c = get_cur()
+    today = date.today()
+
+    # ── Greeting / on-open ──
+    if msg == "__greet__":
+        uname = session.get("username","there")
+        role = session.get("role","")
+        return (f"👋 Hello {uname}! I'm Thendralla, your loan assistant.\n\n"
+                f"You're logged in as {role}. Ask me things like:\n"
+                f"• \"How many loans do I have\"\n"
+                f"• \"Today summary\"\n"
+                f"• \"Upcoming EMI\"\n"
+                f"• \"Overdue loans\"\n"
+                f"• \"This week insights\"\n"
+                f"• Or just type a loan number / customer name / vehicle number.")
+
+    if any(g == low for g in ["hi","hello","hey","help","hii","hlo","menu"]) or "what can you do" in low:
+        uname = session.get("username","")
+        return (f"👋 Hi {uname}! Ask me about:\n"
+                f"• Loan counts & status (\"how many loans\")\n"
+                f"• Today's summary, this week's insights\n"
+                f"• Upcoming / overdue EMIs\n"
+                f"• Collections / outstanding amounts\n"
+                f"• Or search by loan number, customer name, vehicle number, mobile.")
+
+    # ── Total loan count / "how many loans" ──
+    if re.search(r"how many loan|total loan|no\.? of loan|number of loan|my loans?$|all loans?$", low):
+        counts = get_loan_summary_counts()
+        return (f"📊 You have {counts['total']} loan(s) in total:\n"
+                + f"• Pending Approval: {counts['pending']}\n"
+                + f"• Active (Approved): {counts['approved']}\n"
+                + f"• Closed: {counts['closed']}\n"
+                + f"• Rejected: {counts['rejected']}\n"
+                + f"• Overdue EMIs: {counts['overdue']}\n"
+                + f"• Upcoming EMIs (10d): {counts['upcoming']}")
+
+    # ── Today summary ──
+    if "today" in low and ("summary" in low or "today" == low.strip() or "give me today" in low):
+        today_iso = today.isoformat()
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(remaining_amount),0) as amt FROM EMI WHERE due_date=? AND status IN ('Pending','Partial','Overdue')",(today_iso,))
+        due_row = c.fetchone()
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(amount_paid),0) as amt FROM EMI WHERE date(paid_at)=? AND status='Paid'",(today_iso,))
+        paid_row = c.fetchone()
+        c.execute("SELECT COUNT(*) as n FROM LoanEntry WHERE date(created_at)=?",(today_iso,))
+        new_row = c.fetchone()
+        overdue_count = len(get_overdue_emis())
+        return (f"📅 Today's Summary ({today_iso}):\n"
+                f"• EMIs due today: {due_row['n']} — {fmt_inr(due_row['amt'])}\n"
+                f"• Collected today: {paid_row['n']} EMI(s) — {fmt_inr(paid_row['amt'])}\n"
+                f"• New loan applications today: {new_row['n']}\n"
+                f"• Total overdue EMIs (all time): {overdue_count}")
+
+    # ── Upcoming EMI ──
+    if "upcoming" in low or "due soon" in low or "next emi" in low:
+        upcoming = get_upcoming_emis()
+        if not upcoming:
+            return "✅ No EMIs are due in the next 10 days."
+        grouped = group_alerts_by_loan(upcoming)
+        lines = [f"⏳ Upcoming EMIs (next {UPCOMING_DAYS} days) — {len(grouped)} loan(s):\n"]
+        for g in grouped[:8]:
+            days_left = (parse_date(g["oldest_due"]) - today).days
+            lines.append(f"• {g['loan_number']} ({g['customer_name']}) — {fmt_inr(g['total_due'])} due {g['oldest_due']} (in {days_left}d)")
+        if len(grouped) > 8:
+            lines.append(f"...and {len(grouped)-8} more. Check the Alerts page for full list.")
+        return "\n".join(lines)
+
+    # ── Overdue ──
+    if "overdue" in low or "late payment" in low or "delayed" in low:
+        overdue = get_overdue_emis()
+        if not overdue:
+            return "✅ No overdue EMIs! All customers are up to date."
+        grouped = group_alerts_by_loan(overdue)
+        total_amt = sum(g["total_due"] for g in grouped)
+        lines = [f"🔴 Overdue — {len(grouped)} loan(s), total {fmt_inr(total_amt)}:\n"]
+        for g in grouped[:8]:
+            days_overdue = (today - parse_date(g["oldest_due"])).days
+            lines.append(f"• {g['loan_number']} ({g['customer_name']}) — {fmt_inr(g['total_due'])}, {days_overdue}d overdue")
+        if len(grouped) > 8:
+            lines.append(f"...and {len(grouped)-8} more. Check the Alerts page for full list.")
+        return "\n".join(lines)
+
+    # ── This week insights ──
+    if "this week" in low or "weekly" in low or "week insight" in low:
+        week_ago = (today - timedelta(days=7)).isoformat()
+        today_iso = today.isoformat()
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(amount_paid),0) as amt FROM EMI WHERE status='Paid' AND date(paid_at)>=? AND date(paid_at)<=?",(week_ago,today_iso))
+        coll = c.fetchone()
+        c.execute("SELECT COUNT(*) as n FROM LoanEntry WHERE date(created_at)>=? AND date(created_at)<=?",(week_ago,today_iso))
+        new_loans = c.fetchone()
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(remaining_amount),0) as amt FROM EMI WHERE due_date>=? AND due_date<=? AND status IN ('Pending','Partial','Overdue')",(week_ago,today_iso))
+        due_week = c.fetchone()
+        c.execute("SELECT COUNT(*) as n FROM LoanEntry WHERE status='Approved' AND date(created_at)>=? AND date(created_at)<=?",(week_ago,today_iso))
+        approved_week = c.fetchone()
+        return (f"📈 This Week's Insights (last 7 days):\n"
+                f"• Collections: {coll['n']} EMI(s) — {fmt_inr(coll['amt'])}\n"
+                f"• New loan applications: {new_loans['n']}\n"
+                f"• Loans approved: {approved_week['n']}\n"
+                f"• EMIs due (this window): {due_week['n']} — {fmt_inr(due_week['amt'])}")
+
+    # ── Last month profit / collections ──
+    if "last month" in low and ("profit" in low or "collection" in low or "income" in low or "revenue" in low):
+        first_of_this_month = today.replace(day=1)
+        last_month_end = first_of_this_month - timedelta(days=1)
+        last_month_start = last_month_end.replace(day=1)
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(amount_paid),0) as amt FROM EMI WHERE status='Paid' AND date(paid_at)>=? AND date(paid_at)<=?",
+                  (last_month_start.isoformat(), last_month_end.isoformat()))
+        row = c.fetchone()
+        c.execute("SELECT COALESCE(SUM(extra_interest),0) as ei FROM EMI WHERE status='Paid' AND date(paid_at)>=? AND date(paid_at)<=?",
+                  (last_month_start.isoformat(), last_month_end.isoformat()))
+        extra = c.fetchone()["ei"] or 0
+        return (f"💰 Last Month ({last_month_start.strftime('%B %Y')}) Collections:\n"
+                f"• EMIs collected: {row['n']}\n"
+                f"• Total collected (EMI amounts): {fmt_inr(row['amt'])}\n"
+                f"• Extra/late interest collected: {fmt_inr(extra)}\n\n"
+                f"ℹ️ This is total cash collected (principal + interest), not net profit after expenses.")
+
+    # ── Outstanding / Collections totals ──
+    if "outstanding" in low or "total due" in low or "pending amount" in low:
+        tl,tla,tr,tp = get_kpi_totals()
+        return f"⏳ Total Outstanding across all loans: {fmt_inr(tp)}\n💰 Total Disbursed: {fmt_inr(tla)}"
+
+    if "total collect" in low or "how much collected" in low or "collections" in low:
+        tl,tla,tr,tp = get_kpi_totals()
+        return f"✅ Total Collected so far: {fmt_inr(tr)}"
+
+    if "disburs" in low:
+        tl,tla,tr,tp = get_kpi_totals()
+        return f"💰 Total Disbursed: {fmt_inr(tla)} across {tl} loan(s)"
+
+    # ── Status-specific counts ──
+    if "pending approval" in low or "waiting for approval" in low:
+        counts = get_loan_summary_counts()
+        return f"⏳ {counts['pending']} loan(s) pending approval."
+
+    if "closed loan" in low or "completed loan" in low:
+        counts = get_loan_summary_counts()
+        return f"🔒 {counts['closed']} loan(s) closed."
+
+    if "rejected loan" in low:
+        counts = get_loan_summary_counts()
+        return f"❌ {counts['rejected']} loan(s) rejected."
+
+    if "active loan" in low or "approved loan" in low:
+        counts = get_loan_summary_counts()
+        return f"✅ {counts['approved']} active loan(s)."
+
+    return None  # fall through to search
+
+
+@app.route("/api/chatbot", methods=["POST"])
+@login_required
+def api_chatbot():
+    data = request.get_json() or {}
+    msg = (data.get("message") or "").strip()
+    if not msg:
+        return jsonify({"reply": "Please type something — a loan number, customer name, or ask me a question about your loans."})
+
+    low = msg.lower().strip()
+
+    intent_reply = _chatbot_intent(msg, low)
+    if intent_reply is not None:
+        return jsonify({"reply": intent_reply})
+
+    results = _chatbot_search_loans(msg)
+
+    if not results:
+        return jsonify({"reply": (
+            f"🔍 I couldn't find any loan, customer, or vehicle matching \"{msg}\", "
+            f"and it doesn't look like a question I recognize.\n\n"
+            f"Try:\n• A loan number (e.g. LN-2026-01)\n• A customer or vehicle name\n"
+            f"• \"How many loans do I have\"\n• \"Today summary\" / \"Upcoming EMI\" / \"Overdue loans\" / \"This week insights\""
+        )})
+
+    if len(results) == 1:
+        reply = _chatbot_loan_summary(results[0], detailed=True)
+        return jsonify({"reply": reply})
+
+    lines = [f"🔎 Found {len(results)} matches for \"{msg}\":\n"]
+    for loan in results:
+        lines.append(f"• {loan['loan_number']} — {_na(loan.get('customer_name'))} ({loan['status']})")
+    lines.append("\nType the exact loan number above for full details.")
+    return jsonify({"reply": "\n".join(lines)})
 
 # ── SMS Alert APIs ─────────────────────────────────────────────────────────────
 @app.route("/api/sms/overdue", methods=["POST"])
