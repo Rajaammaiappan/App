@@ -1189,6 +1189,15 @@ tr.row-paid td{opacity:.65;}
   transition:.15s;
 }
 .chat-suggestions button:hover{background:var(--accent);color:#fff;}
+.chat-options{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;}
+.chat-options button{
+  background:#fff;border:1px solid var(--accent);border-radius:14px;
+  padding:5px 11px;font-size:11.5px;cursor:pointer;color:var(--accent);
+  transition:.15s;
+}
+.chat-options button:hover{background:var(--accent);color:#fff;}
+.chat-options button.back-btn{border-color:var(--border);color:var(--muted);}
+.chat-options button.back-btn:hover{background:var(--surface2);color:var(--text);}
 .chatbot-input-row{display:flex;gap:6px;padding:10px;border-top:1px solid var(--border);background:var(--surface);}
 .chatbot-input-row input{flex:1;padding:9px 10px;font-size:13px;min-height:auto;}
 .chatbot-input-row button{
@@ -1264,6 +1273,68 @@ function tfcAsk(text){
   document.getElementById('tfcChatInput').value = text;
   document.getElementById('tfcChatForm').requestSubmit();
 }
+
+// ── Guided Question Builder (level-by-level option chips) ──
+const TFC_TOPICS = [
+  {label:"📈 Profit",            needs:"period",  build:(p)=>`${p} profit`},
+  {label:"📊 Profit Comparison", needs:"period",  build:(p)=>`${p} profit comparison`},
+  {label:"🏦 Loan Comparison",   needs:"period",  build:(p)=>`${p} loan comparison`},
+  {label:"💰 Disbursed",         needs:"period",  build:(p)=>`${p} disbursed`},
+  {label:"✅ Expected Collections", needs:"period", build:(p)=>`${p} how much will get collected`},
+  {label:"🏆 Top High-Amount Loans", needs:"count", build:(n)=>`high amount pending loans top ${n}`},
+  {label:"🔴 Overdue Loans",     needs:null, direct:"overdue loans"},
+  {label:"⏳ Upcoming EMI",       needs:null, direct:"upcoming emi"},
+  {label:"📅 Today Summary",     needs:null, direct:"today summary"},
+  {label:"📆 This Week Insights", needs:null, direct:"this week insights"},
+  {label:"👥 Customer Stats",    needs:null, direct:"how many customers"},
+];
+const TFC_PERIODS = ["This Week","This Month","Next Month","Last Month","This Quarter","Next Quarter","Last Quarter","This Year","Next Year"];
+const TFC_COUNTS = ["3","5","10","20"];
+
+function tfcGuidedStart(){
+  tfcAddMsg('bot', "Sure! What would you like to know about? (Step 1 of 2)");
+  tfcShowOptions(TFC_TOPICS.map(t=>t.label), (label)=>{
+    const topic = TFC_TOPICS.find(t=>t.label===label);
+    if(topic.direct){
+      tfcAsk(topic.direct);
+    } else if(topic.needs==="period"){
+      tfcAddMsg('bot', `Got it — "${label}". Now pick a time period (Step 2 of 2):`);
+      tfcShowOptions(TFC_PERIODS, (period)=>{
+        tfcAsk(topic.build(period.toLowerCase()));
+      }, true);
+    } else if(topic.needs==="count"){
+      tfcAddMsg('bot', `Got it — "${label}". How many would you like to see? (Step 2 of 2)`);
+      tfcShowOptions(TFC_COUNTS, (n)=>{
+        tfcAsk(topic.build(n));
+      }, true);
+    }
+  });
+}
+
+function tfcShowOptions(options, onPick, withBack){
+  const body = document.getElementById('tfcChatBody');
+  const wrap = document.createElement('div');
+  wrap.className = 'chat-msg bot';
+  const optsDiv = document.createElement('div');
+  optsDiv.className = 'chat-options';
+  options.forEach(opt=>{
+    const btn = document.createElement('button');
+    btn.textContent = opt;
+    btn.onclick = ()=>{ wrap.remove(); tfcAddMsg('user', opt); onPick(opt); };
+    optsDiv.appendChild(btn);
+  });
+  if(withBack){
+    const back = document.createElement('button');
+    back.textContent = '⬅ Back';
+    back.className = 'back-btn';
+    back.onclick = ()=>{ wrap.remove(); tfcGuidedStart(); };
+    optsDiv.appendChild(back);
+  }
+  wrap.appendChild(optsDiv);
+  body.appendChild(wrap);
+  body.scrollTop = body.scrollHeight;
+}
+
 function tfcSendMsg(e){
   e.preventDefault();
   const input = document.getElementById('tfcChatInput');
@@ -1364,6 +1435,7 @@ document.querySelectorAll('.sidebar nav a').forEach(a=>{{
   </div>
   <div id="tfcChatBody" class="chatbot-body"></div>
   <div class="chat-suggestions">
+    <button onclick="tfcGuidedStart()">🧩 Build a Question</button>
     <button onclick="tfcAsk(\\'How many loans do I have\\')">📊 My Loans</button>
     <button onclick="tfcAsk(\\'Today summary\\')">📅 Today</button>
     <button onclick="tfcAsk(\\'Upcoming EMI\\')">⏳ Upcoming EMI</button>
@@ -2766,12 +2838,13 @@ CHATBOT_VOCAB = [
     "list","my","all","of","do","i","have","about","upcoming","days","day","what","is",
     "hi","hey","help","menu","hello",
     "average","avg","customers","vehicle","type","two","four","wheeler","commercial",
-    "highest","lowest","interest","rate","worst","reloan","new","applications","next","this","last","quarter","profit","overall",
+    "highest","lowest","interest","rate","worst","reloan","new","applications","next","this","last","quarter","profit","overall","collected","disbursed","compare","comparison","get","will","end","now","from","till","year",
 ]
 
 CHATBOT_ALIASES = {
     "qtr": "quarter", "qtrs": "quarters", "qtor": "quarter", "qtator": "quarter",
-    "quator": "quarter", "qaurter": "quarter", "quartar": "quarter",
+    "quator": "quarter", "qaurter": "quarter", "quartar": "quarter", "qty": "quarter",
+    "comparision": "comparison", "disburshed": "disbursed", "distibuted": "disbursed", "distributed": "disbursed",
     "yr": "year", "yrs": "years", "wk": "week", "wks": "weeks",
     "mo": "month", "mos": "months", "nxt": "next",
     "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
@@ -2807,12 +2880,16 @@ def _profit_period_range(today, rel, unit, n=1):
         start = today - timedelta(days=today.weekday())  # Monday of this week
         if rel == "next":
             start += timedelta(days=7)
+        elif rel == "last":
+            start -= timedelta(days=7*n)
         end = start + timedelta(days=7*n - 1)
         return start, end
 
     if unit == "month":
         if rel == "this":
             start = today.replace(day=1)
+        elif rel == "last":
+            start = _add_months(today.replace(day=1), -n)
         else:
             start = _add_months(today.replace(day=1), 1)
         end_month_start = _add_months(start, n)
@@ -2899,6 +2976,8 @@ def _chatbot_intent(msg, low):
                 f"• \"How many customers\", \"average loan amount\"\n"
                 f"• \"Loans by vehicle type\", \"highest interest rate\"\n"
                 f"• \"Most overdue customer\", \"new loans this month\"\n"
+                f"• \"This year how much will get collected\"\n"
+                f"• \"Compare this month and last month profit\"\n"
                 f"• Or just type a loan number / customer name / vehicle number.")
 
     if any(g == low for g in ["hi","hello","hey","help","hii","hlo","menu"]) or "what can you do" in low:
@@ -3011,6 +3090,66 @@ def _chatbot_intent(msg, low):
             lines.append(f"• {r['loan_number']} — {_na(r['customer_name'])} ({r['status']}) — {fmt_inr(amt)} {label}")
         return "\n".join(lines)
 
+    # ── Period COMPARISON: "this month and last month ... comparison" ──
+    if "compar" in low:
+        unit = next((u for u in ["quarter","month","year","week"] if u in low), None)
+        if unit:
+            if "profit" in low:
+                metric = "profit"
+            elif "disburs" in low:
+                metric = "disbursed"
+            elif "collect" in low:
+                metric = "collected"
+            elif "loan" in low:
+                metric = "loans"
+            else:
+                metric = "profit"
+
+            this_s, this_e = _profit_period_range(today, "this", unit)
+            last_s, last_e = _profit_period_range(today, "last", unit)
+            unit_label = unit.capitalize()
+
+            def _period_metric(start, end):
+                if metric == "profit":
+                    r = _profit_for_range(start, end)
+                    return r["total_profit"], r["collected_profit"]
+                if metric == "disbursed" or metric == "loans":
+                    c.execute("SELECT COUNT(*) as n, COALESCE(SUM(loan_amount),0) as amt FROM LoanEntry WHERE date(created_at)>=? AND date(created_at)<=?",
+                              (start.isoformat(), end.isoformat()))
+                    row = c.fetchone()
+                    return row["amt"], row["n"]
+                # collected (expected collections = full EMI amounts due)
+                c.execute("SELECT COALESCE(SUM(emi_amount),0) as amt, COUNT(*) as n FROM EMI WHERE due_date>=? AND due_date<=?",
+                          (start.isoformat(), end.isoformat()))
+                row = c.fetchone()
+                return row["amt"], row["n"]
+
+            this_val, this_extra = _period_metric(this_s, this_e)
+            last_val, last_extra = _period_metric(last_s, last_e)
+            diff = this_val - last_val
+            pct = (diff / last_val * 100) if last_val else (100.0 if this_val else 0.0)
+            arrow = "📈 up" if diff > 0 else ("📉 down" if diff < 0 else "➡️ flat")
+
+            if metric == "profit":
+                return (f"📊 {unit_label}ly Profit Comparison:\n"
+                        f"• This {unit_label} ({this_s.isoformat()} to {this_e.isoformat()}): {fmt_inr(this_val)} "
+                        f"(collected: {fmt_inr(this_extra)})\n"
+                        f"• Last {unit_label} ({last_s.isoformat()} to {last_e.isoformat()}): {fmt_inr(last_val)} "
+                        f"(collected: {fmt_inr(last_extra)})\n\n"
+                        f"{arrow} by {fmt_inr(abs(diff))} ({abs(pct):.1f}%)")
+            elif metric in ("disbursed","loans"):
+                label = "New Loans / Disbursed Amount" if metric=="loans" else "Disbursed Amount"
+                return (f"📊 {unit_label}ly {label} Comparison:\n"
+                        f"• This {unit_label}: {fmt_inr(this_val)} across {this_extra} loan(s)\n"
+                        f"• Last {unit_label}: {fmt_inr(last_val)} across {last_extra} loan(s)\n\n"
+                        f"{arrow} by {fmt_inr(abs(diff))} ({abs(pct):.1f}%)")
+            else:
+                return (f"📊 {unit_label}ly Expected Collections Comparison:\n"
+                        f"• This {unit_label}: {fmt_inr(this_val)} ({this_extra} EMI installments due)\n"
+                        f"• Last {unit_label}: {fmt_inr(last_val)} ({last_extra} EMI installments due)\n\n"
+                        f"{arrow} by {fmt_inr(abs(diff))} ({abs(pct):.1f}%)")
+
+
     # ── Period-based / overall PROFIT projection ──
     # Profit = interest portion of EMI installments due in the period
     # (EMI amount minus the principal share, where principal share = loan_amount / total_installments)
@@ -3067,6 +3206,75 @@ def _chatbot_intent(msg, low):
                     f"ℹ️ This is your total interest income across every loan — past, present and future installments.\n"
                     f"💡 Tip: ask \"this month profit\", \"next quarter profit\", \"last quarter profit\", "
                     f"\"next 2 months profit\", etc. for a specific period.")
+
+    # ── Expected collections for a period: "this/next/last X how much will get collected" ──
+    if ("collect" in low or "get" in low) and "profit" not in low:
+        m = re.search(r"(this|next|last)\s+(\d+)?\s*(week|month|year|quarter)s?", low)
+        if m:
+            rel = m.group(1)
+            n = int(m.group(2)) if m.group(2) else 1
+            unit = m.group(3)
+            n = max(1, min(n, 24))
+            start, end = _profit_period_range(today, rel, unit, n)
+
+            c.execute("""SELECT COUNT(*) as n,
+                                COALESCE(SUM(emi_amount),0) as total,
+                                COALESCE(SUM(CASE WHEN status='Paid' THEN amount_paid
+                                                   WHEN status='Partial' THEN amount_paid
+                                                   ELSE 0 END),0) as collected
+                         FROM EMI WHERE due_date>=? AND due_date<=?""",
+                      (start.isoformat(), end.isoformat()))
+            row = c.fetchone()
+            total = row["total"] or 0
+            collected = row["collected"] or 0
+            pending = total - collected
+
+            if unit == "month" and n == 1:
+                period_label = start.strftime("%B %Y")
+            elif unit == "quarter" and n == 1:
+                q_num = (start.month - 1)//3 + 1
+                period_label = f"Q{q_num} {start.year}"
+            elif unit == "year" and n == 1:
+                period_label = str(start.year)
+            else:
+                period_label = f"{rel.capitalize()} {n} {unit.capitalize()}{'s' if n>1 else ''}"
+
+            if row["n"] == 0:
+                return f"💰 Expected Collections — {period_label}:\nNo EMIs are due in this period."
+
+            return (f"💰 Expected Collections — {period_label} ({start.isoformat()} to {end.isoformat()}):\n"
+                    f"• EMI installments due: {row['n']}\n"
+                    f"• Total expected collection: {fmt_inr(total)}\n"
+                    f"• Already collected: {fmt_inr(collected)}\n"
+                    f"• Still pending: {fmt_inr(pending)}\n\n"
+                    f"ℹ️ This is the full EMI amount (principal + interest), not just profit.")
+
+    # ── Disbursed amount for a period: "last year how much disbursed" ──
+    if "disburs" in low:
+        m = re.search(r"(this|next|last)\s+(\d+)?\s*(week|month|year|quarter)s?", low)
+        if m:
+            rel = m.group(1)
+            n = int(m.group(2)) if m.group(2) else 1
+            unit = m.group(3)
+            n = max(1, min(n, 24))
+            start, end = _profit_period_range(today, rel, unit, n)
+
+            c.execute("SELECT COUNT(*) as n, COALESCE(SUM(loan_amount),0) as amt FROM LoanEntry WHERE date(created_at)>=? AND date(created_at)<=?",
+                      (start.isoformat(), end.isoformat()))
+            row = c.fetchone()
+
+            if unit == "month" and n == 1:
+                period_label = start.strftime("%B %Y")
+            elif unit == "quarter" and n == 1:
+                q_num = (start.month - 1)//3 + 1
+                period_label = f"Q{q_num} {start.year}"
+            elif unit == "year" and n == 1:
+                period_label = str(start.year)
+            else:
+                period_label = f"{rel.capitalize()} {n} {unit.capitalize()}{'s' if n>1 else ''}"
+
+            return (f"💰 Disbursed — {period_label} ({start.isoformat()} to {end.isoformat()}):\n"
+                    f"• {row['n']} loan(s) disbursed, totaling {fmt_inr(row['amt'])}")
 
     # ── This week insights ──
     if "this week" in low or "weekly" in low or "week insight" in low:
