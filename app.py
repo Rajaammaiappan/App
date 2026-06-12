@@ -1436,11 +1436,11 @@ document.querySelectorAll('.sidebar nav a').forEach(a=>{{
   <div id="tfcChatBody" class="chatbot-body"></div>
   <div class="chat-suggestions">
     <button onclick="tfcGuidedStart()">🧩 Build a Question</button>
-    <button onclick="tfcAsk(\\'How many loans do I have\\')">📊 My Loans</button>
-    <button onclick="tfcAsk(\\'Today summary\\')">📅 Today</button>
-    <button onclick="tfcAsk(\\'Upcoming EMI\\')">⏳ Upcoming EMI</button>
-    <button onclick="tfcAsk(\\'Overdue loans\\')">🔴 Overdue</button>
-    <button onclick="tfcAsk(\\'This week insights\\')">📈 This Week</button>
+    <button onclick="tfcAsk('How many loans do I have')">📊 My Loans</button>
+    <button onclick="tfcAsk('Today summary')">📅 Today</button>
+    <button onclick="tfcAsk('Upcoming EMI')">⏳ Upcoming EMI</button>
+    <button onclick="tfcAsk('Overdue loans')">🔴 Overdue</button>
+    <button onclick="tfcAsk('This week insights')">📈 This Week</button>
   </div>
   <form id="tfcChatForm" class="chatbot-input-row" onsubmit="return tfcSendMsg(event)">
     <input id="tfcChatInput" placeholder="Ask Thendralla anything..." autocomplete="off">
