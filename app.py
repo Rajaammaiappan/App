@@ -1355,27 +1355,27 @@ document.querySelectorAll('.sidebar nav a').forEach(a=>{{
   }});
 }});
 </script>
-<!-- Chatbot Widget -->
-<button class="chatbot-fab" onclick="tfcChatToggle()" title="Ask Thendralla">💬</button>
+<!-- Chatbot Widget (Admin / Super Admin only) -->
+{f'''<button class="chatbot-fab" onclick="tfcChatToggle()" title="Ask Thendralla">💬</button>
 <div class="chatbot-window" id="tfcChatWindow">
   <div class="chatbot-header">
-    <span>🤖 Thendralla — Loan Assistant</span>
+    <span>🤖 Thendralla — AI Assistant</span>
     <button onclick="tfcChatToggle()">✕</button>
   </div>
   <div id="tfcChatBody" class="chatbot-body"></div>
   <div class="chat-suggestions">
-    <button onclick="tfcAsk('How many loans do I have')">📊 My Loans</button>
-    <button onclick="tfcAsk('Today summary')">📅 Today</button>
-    <button onclick="tfcAsk('Upcoming EMI')">⏳ Upcoming EMI</button>
-    <button onclick="tfcAsk('Overdue loans')">🔴 Overdue</button>
-    <button onclick="tfcAsk('This week insights')">📈 This Week</button>
+    <button onclick="tfcAsk(\\'How many loans do I have\\')">📊 My Loans</button>
+    <button onclick="tfcAsk(\\'Today summary\\')">📅 Today</button>
+    <button onclick="tfcAsk(\\'Upcoming EMI\\')">⏳ Upcoming EMI</button>
+    <button onclick="tfcAsk(\\'Overdue loans\\')">🔴 Overdue</button>
+    <button onclick="tfcAsk(\\'This week insights\\')">📈 This Week</button>
   </div>
   <form id="tfcChatForm" class="chatbot-input-row" onsubmit="return tfcSendMsg(event)">
     <input id="tfcChatInput" placeholder="Ask Thendralla anything..." autocomplete="off">
     <button type="submit">➤</button>
   </form>
 </div>
-{CHATBOT_JS}
+{CHATBOT_JS}''' if role in ("admin","superadmin") else ""}
 </body>
 </html>"""
 
@@ -2766,8 +2766,18 @@ CHATBOT_VOCAB = [
     "list","my","all","of","do","i","have","about","upcoming","days","day","what","is",
     "hi","hey","help","menu","hello",
     "average","avg","customers","vehicle","type","two","four","wheeler","commercial",
-    "highest","lowest","interest","rate","worst","reloan","new","applications","next","this","last",
+    "highest","lowest","interest","rate","worst","reloan","new","applications","next","this","last","quarter","profit","overall",
 ]
+
+CHATBOT_ALIASES = {
+    "qtr": "quarter", "qtrs": "quarters", "qtor": "quarter", "qtator": "quarter",
+    "quator": "quarter", "qaurter": "quarter", "quartar": "quarter",
+    "yr": "year", "yrs": "years", "wk": "week", "wks": "weeks",
+    "mo": "month", "mos": "months", "nxt": "next",
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12",
+}
 
 def _normalize_query(text):
     """Best-effort spelling correction against known chatbot vocabulary,
@@ -2775,6 +2785,8 @@ def _normalize_query(text):
     words = re.findall(r"[a-zA-Z]+|\d+", text.lower())
     fixed = []
     for w in words:
+        if w in CHATBOT_ALIASES:
+            fixed.append(CHATBOT_ALIASES[w]); continue
         if w.isdigit() or len(w) < 2 or w in CHATBOT_VOCAB:
             fixed.append(w); continue
         match = difflib.get_close_matches(w, CHATBOT_VOCAB, n=1, cutoff=0.74)
@@ -2782,31 +2794,89 @@ def _normalize_query(text):
     return " ".join(fixed)
 
 
-def _profit_period_range(today, rel, unit):
-    """Return (start_date, end_date) inclusive for 'this/next week/month/year'."""
+def _add_months(d, n):
+    month = d.month - 1 + n
+    year = d.year + month // 12
+    month = month % 12 + 1
+    return date(year, month, 1)
+
+def _profit_period_range(today, rel, unit, n=1):
+    """Return (start_date, end_date) inclusive for 'this/next week/month/year/quarter',
+    optionally spanning N periods (e.g. 'next 2 months')."""
     if unit == "week":
         start = today - timedelta(days=today.weekday())  # Monday of this week
-        end = start + timedelta(days=6)                  # Sunday
         if rel == "next":
-            start += timedelta(days=7); end += timedelta(days=7)
+            start += timedelta(days=7)
+        end = start + timedelta(days=7*n - 1)
         return start, end
 
     if unit == "month":
         if rel == "this":
             start = today.replace(day=1)
         else:
-            ny = today.year + (1 if today.month == 12 else 0)
-            nm = 1 if today.month == 12 else today.month + 1
-            start = date(ny, nm, 1)
-        if start.month == 12:
-            end = date(start.year, 12, 31)
-        else:
-            end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+            start = _add_months(today.replace(day=1), 1)
+        end_month_start = _add_months(start, n)
+        end = end_month_start - timedelta(days=1)
+        return start, end
+
+    if unit == "quarter":
+        cur_q_start_month = ((today.month - 1) // 3) * 3 + 1  # 1,4,7,10
+        start = date(today.year, cur_q_start_month, 1)
+        if rel == "next":
+            start = _add_months(start, 3)
+        elif rel == "last":
+            start = _add_months(start, -3)
+        end_start = _add_months(start, 3*n)
+        end = end_start - timedelta(days=1)
         return start, end
 
     # year
-    yr = today.year if rel == "this" else today.year + 1
-    return date(yr, 1, 1), date(yr, 12, 31)
+    if rel == "this":
+        yr = today.year
+    elif rel == "last":
+        yr = today.year - 1
+    else:
+        yr = today.year + 1
+    start = date(yr, 1, 1)
+    end = date(yr + n - 1, 12, 31)
+    return start, end
+
+
+def _profit_for_range(start, end):
+    """Compute profit (interest-portion) stats for EMI installments with
+    due_date in [start, end]. If start/end are None, computes across ALL EMIs."""
+    c = get_cur()
+    if start is None:
+        c.execute("""SELECT e.emi_amount, e.amount_paid, e.status, le.loan_amount,
+                            (SELECT COUNT(*) FROM EMI e2 WHERE e2.loan_id=e.loan_id) as n_inst
+                     FROM EMI e JOIN LoanEntry le ON le.id=e.loan_id""")
+    else:
+        c.execute("""SELECT e.emi_amount, e.amount_paid, e.status, le.loan_amount,
+                            (SELECT COUNT(*) FROM EMI e2 WHERE e2.loan_id=e.loan_id) as n_inst
+                     FROM EMI e JOIN LoanEntry le ON le.id=e.loan_id
+                     WHERE e.due_date>=? AND e.due_date<=?""",
+                  (start.isoformat(), end.isoformat()))
+    rows = c.fetchall()
+
+    total_profit = 0.0
+    collected_profit = 0.0
+    for r in rows:
+        n_inst = r["n_inst"] or 1
+        principal_share = float(r["loan_amount"]) / n_inst
+        interest_share = float(r["emi_amount"]) - principal_share
+        total_profit += interest_share
+        if r["status"] == "Paid":
+            collected_profit += interest_share
+        elif r["status"] == "Partial" and r["emi_amount"]:
+            paid_ratio = float(r["amount_paid"] or 0) / float(r["emi_amount"])
+            collected_profit += interest_share * paid_ratio
+
+    return {
+        "n_installments": len(rows),
+        "total_profit": total_profit,
+        "collected_profit": collected_profit,
+        "pending_profit": total_profit - collected_profit,
+    }
 
 
 def _chatbot_intent(msg, low):
@@ -2818,7 +2888,7 @@ def _chatbot_intent(msg, low):
     if msg == "__greet__":
         uname = session.get("username","there")
         role = session.get("role","")
-        return (f"👋 Hello {uname}! I'm Thendralla, your loan assistant.\n\n"
+        return (f"👋 Hello {uname}! I'm Thendralla, your AI assistant.\n\n"
                 f"You're logged in as {role}. Ask me things like:\n"
                 f"• \"How many loans do I have\"\n"
                 f"• \"Today summary\"\n"
@@ -2941,51 +3011,62 @@ def _chatbot_intent(msg, low):
             lines.append(f"• {r['loan_number']} — {_na(r['customer_name'])} ({r['status']}) — {fmt_inr(amt)} {label}")
         return "\n".join(lines)
 
-    # ── Period-based PROFIT projection: "this/next week/month/year profit" ──
-    # Profit = interest portion of EMI installments due in that period
+    # ── Period-based / overall PROFIT projection ──
+    # Profit = interest portion of EMI installments due in the period
     # (EMI amount minus the principal share, where principal share = loan_amount / total_installments)
-    m = re.search(r"(this|next)\s+(week|month|year)", low)
-    if "profit" in low and m and "last" not in low:
-        rel, unit = m.group(1), m.group(2)
-        start, end = _profit_period_range(today, rel, unit)
+    if "profit" in low:
+        # "next 2 months profit", "next 3 weeks profit", etc. (N before the unit)
+        m = re.search(r"(this|next|last)\s+(\d+)?\s*(week|month|year|quarter)s?", low)
 
-        c.execute("""SELECT e.emi_amount, e.amount_paid, e.status, le.loan_amount,
-                            (SELECT COUNT(*) FROM EMI e2 WHERE e2.loan_id=e.loan_id) as n_inst
-                     FROM EMI e JOIN LoanEntry le ON le.id=e.loan_id
-                     WHERE e.due_date>=? AND e.due_date<=?""",
-                  (start.isoformat(), end.isoformat()))
-        rows = c.fetchall()
+        # "last month" + profit/collection => handled by the dedicated
+        # Last-Month-Collections intent below; don't intercept it here.
+        is_last_month = m and m.group(1) == "last" and m.group(3) == "month" and not m.group(2)
 
-        total_profit = 0.0
-        collected_profit = 0.0
-        n_installments = len(rows)
-        for r in rows:
-            n_inst = r["n_inst"] or 1
-            principal_share = float(r["loan_amount"]) / n_inst
-            interest_share = float(r["emi_amount"]) - principal_share
-            total_profit += interest_share
-            if r["status"] == "Paid":
-                collected_profit += interest_share
-            elif r["status"] == "Partial" and r["emi_amount"]:
-                paid_ratio = float(r["amount_paid"] or 0) / float(r["emi_amount"])
-                collected_profit += interest_share * paid_ratio
+        if m and not is_last_month:
+            rel = m.group(1)
+            n = int(m.group(2)) if m.group(2) else 1
+            unit = m.group(3)
+            n = max(1, min(n, 24))
+            start, end = _profit_period_range(today, rel, unit, n)
 
-        pending_profit = total_profit - collected_profit
-        period_label = {"week":"This Week" if rel=="this" else "Next Week",
-                         "month": start.strftime("%B %Y"),
-                         "year": str(start.year)}[unit]
+            unit_label = unit.capitalize()
+            if unit == "week":
+                period_label = f"{rel.capitalize()} Week" if n == 1 else f"{rel.capitalize()} {n} Weeks"
+            elif unit == "month" and n == 1:
+                period_label = start.strftime("%B %Y")
+            elif unit == "quarter":
+                q_num = (start.month - 1)//3 + 1
+                period_label = f"Q{q_num} {start.year}" if n == 1 else f"{rel.capitalize()} {n} Quarters"
+            elif unit == "year" and n == 1:
+                period_label = str(start.year)
+            else:
+                period_label = f"{rel.capitalize()} {n} {unit_label}s"
 
-        if n_installments == 0:
-            return (f"📈 Profit Projection — {period_label}:\n"
-                    f"No EMIs are due in this period, so no profit is expected.")
+            result = _profit_for_range(start, end)
+            if result["n_installments"] == 0:
+                return (f"📈 Profit Projection — {period_label}:\n"
+                        f"No EMIs are due in this period, so no profit is expected.")
+            return (f"📈 Profit Projection — {period_label} ({start.isoformat()} to {end.isoformat()}):\n"
+                    f"• EMI installments due: {result['n_installments']}\n"
+                    f"• Total expected profit (interest portion): {fmt_inr(result['total_profit'])}\n"
+                    f"• Already collected: {fmt_inr(result['collected_profit'])}\n"
+                    f"• Still pending: {fmt_inr(result['pending_profit'])}\n\n"
+                    f"ℹ️ Profit here = EMI amount minus the principal share of each installment "
+                    f"(loan amount ÷ total installments). This is your interest income, not gross collections.")
 
-        return (f"📈 Profit Projection — {period_label} ({start.isoformat()} to {end.isoformat()}):\n"
-                f"• EMI installments due: {n_installments}\n"
-                f"• Total expected profit (interest portion): {fmt_inr(total_profit)}\n"
-                f"• Already collected: {fmt_inr(collected_profit)}\n"
-                f"• Still pending: {fmt_inr(pending_profit)}\n\n"
-                f"ℹ️ Profit here = EMI amount minus the principal share of each installment "
-                f"(loan amount ÷ total installments). This is your interest income, not gross collections.")
+        # Bare / overall: "profit", "all profit", "total profit", "overall profit"
+        if not is_last_month and ("collection" not in low and "income" not in low and "revenue" not in low):
+            result = _profit_for_range(None, None)
+            if result["n_installments"] == 0:
+                return "📈 No EMI schedule found yet, so there's no profit to project."
+            return (f"📈 Overall Profit (all loans, all time):\n"
+                    f"• Total EMI installments: {result['n_installments']}\n"
+                    f"• Total expected profit (interest portion): {fmt_inr(result['total_profit'])}\n"
+                    f"• Already collected: {fmt_inr(result['collected_profit'])}\n"
+                    f"• Still pending: {fmt_inr(result['pending_profit'])}\n\n"
+                    f"ℹ️ This is your total interest income across every loan — past, present and future installments.\n"
+                    f"💡 Tip: ask \"this month profit\", \"next quarter profit\", \"last quarter profit\", "
+                    f"\"next 2 months profit\", etc. for a specific period.")
 
     # ── This week insights ──
     if "this week" in low or "weekly" in low or "week insight" in low:
@@ -3105,6 +3186,7 @@ def _chatbot_intent(msg, low):
 
 @app.route("/api/chatbot", methods=["POST"])
 @login_required
+@role_required("admin","superadmin")
 def api_chatbot():
     data = request.get_json() or {}
     msg = (data.get("message") or "").strip()
