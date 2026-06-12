@@ -2753,6 +2753,62 @@ def _chatbot_loan_summary(loan, detailed=False):
     return "\n".join(lines)
 
 
+# ── FUZZY TYPO CORRECTION ────────────────────────────────────────────────────
+import difflib
+
+CHATBOT_VOCAB = [
+    "loan","loans","pending","overdue","upcoming","today","summary","week","weekly",
+    "month","monthly","profit","collection","collections","collected","outstanding",
+    "total","high","highest","top","amount","customer","customers","active","closed",
+    "rejected","approved","approval","insights","insight","emi","emis","due","this",
+    "last","income","revenue","disbursed","disburse","balance","vehicle","mobile",
+    "number","status","late","delayed","payment","payments","how","many","show","give",
+    "list","my","all","of","do","i","have","about","upcoming","days","day","what","is",
+    "hi","hey","help","menu","hello",
+    "average","avg","customers","vehicle","type","two","four","wheeler","commercial",
+    "highest","lowest","interest","rate","worst","reloan","new","applications","next","this","last",
+]
+
+def _normalize_query(text):
+    """Best-effort spelling correction against known chatbot vocabulary,
+    so typos like 'pendng', 'ovrdue', 'tp 3', 'hihg amout' still match intents."""
+    words = re.findall(r"[a-zA-Z]+|\d+", text.lower())
+    fixed = []
+    for w in words:
+        if w.isdigit() or len(w) < 2 or w in CHATBOT_VOCAB:
+            fixed.append(w); continue
+        match = difflib.get_close_matches(w, CHATBOT_VOCAB, n=1, cutoff=0.74)
+        fixed.append(match[0] if match else w)
+    return " ".join(fixed)
+
+
+def _profit_period_range(today, rel, unit):
+    """Return (start_date, end_date) inclusive for 'this/next week/month/year'."""
+    if unit == "week":
+        start = today - timedelta(days=today.weekday())  # Monday of this week
+        end = start + timedelta(days=6)                  # Sunday
+        if rel == "next":
+            start += timedelta(days=7); end += timedelta(days=7)
+        return start, end
+
+    if unit == "month":
+        if rel == "this":
+            start = today.replace(day=1)
+        else:
+            ny = today.year + (1 if today.month == 12 else 0)
+            nm = 1 if today.month == 12 else today.month + 1
+            start = date(ny, nm, 1)
+        if start.month == 12:
+            end = date(start.year, 12, 31)
+        else:
+            end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+        return start, end
+
+    # year
+    yr = today.year if rel == "this" else today.year + 1
+    return date(yr, 1, 1), date(yr, 12, 31)
+
+
 def _chatbot_intent(msg, low):
     """Return a reply string for analytical / conversational intents, or None if it's a search query."""
     c = get_cur()
@@ -2769,6 +2825,10 @@ def _chatbot_intent(msg, low):
                 f"• \"Upcoming EMI\"\n"
                 f"• \"Overdue loans\"\n"
                 f"• \"This week insights\"\n"
+                f"• \"High amount pending loans top 3\"\n"
+                f"• \"How many customers\", \"average loan amount\"\n"
+                f"• \"Loans by vehicle type\", \"highest interest rate\"\n"
+                f"• \"Most overdue customer\", \"new loans this month\"\n"
                 f"• Or just type a loan number / customer name / vehicle number.")
 
     if any(g == low for g in ["hi","hello","hey","help","hii","hlo","menu"]) or "what can you do" in low:
@@ -2778,6 +2838,7 @@ def _chatbot_intent(msg, low):
                 f"• Today's summary, this week's insights\n"
                 f"• Upcoming / overdue EMIs\n"
                 f"• Collections / outstanding amounts\n"
+                f"• Top high-amount loans (e.g. \"top 5 high amount loans\")\n"
                 f"• Or search by loan number, customer name, vehicle number, mobile.")
 
     # ── Total loan count / "how many loans" ──
@@ -2822,6 +2883,18 @@ def _chatbot_intent(msg, low):
         return "\n".join(lines)
 
     # ── Overdue ──
+    # ── Customer with most overdue (check BEFORE general overdue intent) ──
+    if "most overdue" in low or "worst customer" in low or "highest overdue" in low:
+        overdue = get_overdue_emis()
+        if not overdue:
+            return "✅ No overdue EMIs — every customer is up to date!"
+        grouped = group_alerts_by_loan(overdue)
+        grouped.sort(key=lambda g: g["total_due"], reverse=True)
+        top = grouped[0]
+        return (f"🔴 Customer with the highest overdue amount:\n"
+                f"• {top['loan_number']} — {top['customer_name']}\n"
+                f"• Overdue: {fmt_inr(top['total_due'])} across {top['emi_count']} EMI(s), oldest due {top['oldest_due']}")
+
     if "overdue" in low or "late payment" in low or "delayed" in low:
         overdue = get_overdue_emis()
         if not overdue:
@@ -2835,6 +2908,84 @@ def _chatbot_intent(msg, low):
         if len(grouped) > 8:
             lines.append(f"...and {len(grouped)-8} more. Check the Alerts page for full list.")
         return "\n".join(lines)
+
+    # ── Top N high-amount pending loans ──
+    # Matches: "High amount pending loans top 3", "loans top 5", "high pending loans top 2",
+    # "top 5 pending loans", "highest outstanding loans", etc.
+    if "top" in low and ("loan" in low or "pending" in low or "amount" in low or "outstanding" in low) \
+       or ("high" in low and "loan" in low):
+        m = re.search(r"top\s*(\d+)", low)
+        n = int(m.group(1)) if m else 3
+        n = max(1, min(n, 20))
+
+        c.execute("""SELECT le.id, le.loan_number, le.customer_name, le.status, le.loan_amount,
+                            COALESCE(SUM(CASE WHEN e.status!='Paid' THEN e.remaining_amount ELSE 0 END),0) as outstanding
+                     FROM LoanEntry le LEFT JOIN EMI e ON e.loan_id=le.id
+                     WHERE le.status NOT IN ('Closed','Rejected')
+                     GROUP BY le.id""")
+        rows = c.fetchall()
+
+        ranked = []
+        for r in rows:
+            amt = float(r["loan_amount"]) if r["status"] == "PendingApproval" else float(r["outstanding"] or 0)
+            ranked.append((amt, r))
+        ranked.sort(key=lambda x: x[0], reverse=True)
+        top = ranked[:n]
+
+        if not top:
+            return "📊 No active loans found to rank."
+
+        lines = [f"💰 Top {len(top)} High-Amount Loan(s):\n"]
+        for amt, r in top:
+            label = "Loan Amount (Pending Approval)" if r["status"] == "PendingApproval" else "Outstanding"
+            lines.append(f"• {r['loan_number']} — {_na(r['customer_name'])} ({r['status']}) — {fmt_inr(amt)} {label}")
+        return "\n".join(lines)
+
+    # ── Period-based PROFIT projection: "this/next week/month/year profit" ──
+    # Profit = interest portion of EMI installments due in that period
+    # (EMI amount minus the principal share, where principal share = loan_amount / total_installments)
+    m = re.search(r"(this|next)\s+(week|month|year)", low)
+    if "profit" in low and m and "last" not in low:
+        rel, unit = m.group(1), m.group(2)
+        start, end = _profit_period_range(today, rel, unit)
+
+        c.execute("""SELECT e.emi_amount, e.amount_paid, e.status, le.loan_amount,
+                            (SELECT COUNT(*) FROM EMI e2 WHERE e2.loan_id=e.loan_id) as n_inst
+                     FROM EMI e JOIN LoanEntry le ON le.id=e.loan_id
+                     WHERE e.due_date>=? AND e.due_date<=?""",
+                  (start.isoformat(), end.isoformat()))
+        rows = c.fetchall()
+
+        total_profit = 0.0
+        collected_profit = 0.0
+        n_installments = len(rows)
+        for r in rows:
+            n_inst = r["n_inst"] or 1
+            principal_share = float(r["loan_amount"]) / n_inst
+            interest_share = float(r["emi_amount"]) - principal_share
+            total_profit += interest_share
+            if r["status"] == "Paid":
+                collected_profit += interest_share
+            elif r["status"] == "Partial" and r["emi_amount"]:
+                paid_ratio = float(r["amount_paid"] or 0) / float(r["emi_amount"])
+                collected_profit += interest_share * paid_ratio
+
+        pending_profit = total_profit - collected_profit
+        period_label = {"week":"This Week" if rel=="this" else "Next Week",
+                         "month": start.strftime("%B %Y"),
+                         "year": str(start.year)}[unit]
+
+        if n_installments == 0:
+            return (f"📈 Profit Projection — {period_label}:\n"
+                    f"No EMIs are due in this period, so no profit is expected.")
+
+        return (f"📈 Profit Projection — {period_label} ({start.isoformat()} to {end.isoformat()}):\n"
+                f"• EMI installments due: {n_installments}\n"
+                f"• Total expected profit (interest portion): {fmt_inr(total_profit)}\n"
+                f"• Already collected: {fmt_inr(collected_profit)}\n"
+                f"• Still pending: {fmt_inr(pending_profit)}\n\n"
+                f"ℹ️ Profit here = EMI amount minus the principal share of each installment "
+                f"(loan amount ÷ total installments). This is your interest income, not gross collections.")
 
     # ── This week insights ──
     if "this week" in low or "weekly" in low or "week insight" in low:
@@ -2854,7 +3005,7 @@ def _chatbot_intent(msg, low):
                 f"• Loans approved: {approved_week['n']}\n"
                 f"• EMIs due (this window): {due_week['n']} — {fmt_inr(due_week['amt'])}")
 
-    # ── Last month profit / collections ──
+    # ── Last month profit / collections (actual cash collected) ──
     if "last month" in low and ("profit" in low or "collection" in low or "income" in low or "revenue" in low):
         first_of_this_month = today.replace(day=1)
         last_month_end = first_of_this_month - timedelta(days=1)
@@ -2901,6 +3052,54 @@ def _chatbot_intent(msg, low):
         counts = get_loan_summary_counts()
         return f"✅ {counts['approved']} active loan(s)."
 
+    # ── Total customers ──
+    if "how many customer" in low or "total customer" in low or "number of customer" in low:
+        c.execute("SELECT COUNT(*) as n FROM Customers")
+        n = c.fetchone()["n"] or 0
+        c.execute("SELECT COUNT(*) as n FROM Customers WHERE status='Active'")
+        active_n = c.fetchone()["n"] or 0
+        return f"👥 Total customers: {n}\n• Active: {active_n}\n• Closed: {n - active_n}"
+
+    # ── Average loan amount ──
+    if "average loan" in low or "avg loan" in low:
+        c.execute("SELECT AVG(loan_amount) as a, COUNT(*) as n FROM LoanEntry")
+        row = c.fetchone()
+        return f"📐 Average loan amount across {row['n']} loan(s): {fmt_inr(row['a'] or 0)}"
+
+    # ── New loans this month ──
+    if "this month" in low and ("new loan" in low or "loan" in low):
+        start = today.replace(day=1).isoformat()
+        c.execute("SELECT COUNT(*) as n, COALESCE(SUM(loan_amount),0) as amt FROM LoanEntry WHERE date(created_at)>=?", (start,))
+        row = c.fetchone()
+        return f"🆕 New loan applications this month ({today.strftime('%B %Y')}): {row['n']}\n💰 Total amount applied: {fmt_inr(row['amt'])}"
+
+    # ── Loans by vehicle type ──
+    if "vehicle type" in low or "by vehicle" in low or ("two wheeler" in low or "four wheeler" in low or "commercial vehicle" in low):
+        c.execute("SELECT vehicle_type, COUNT(*) as n FROM LoanEntry GROUP BY vehicle_type ORDER BY n DESC")
+        rows = c.fetchall()
+        if not rows: return "🚗 No loans found."
+        lines = ["🚗 Loans by Vehicle Type:\n"]
+        for r in rows:
+            lines.append(f"• {r['vehicle_type'] or 'Unknown'}: {r['n']}")
+        return "\n".join(lines)
+
+    # ── Highest / lowest interest rate ──
+    if ("highest" in low or "lowest" in low) and ("interest" in low or "rate" in low):
+        order = "DESC" if "highest" in low else "ASC"
+        c.execute(f"SELECT loan_number, customer_name, interest_rate, loan_amount FROM LoanEntry ORDER BY interest_rate {order} LIMIT 1")
+        row = c.fetchone()
+        if not row: return "📊 No loans found."
+        word = "highest" if order=="DESC" else "lowest"
+        return (f"📊 Loan with the {word} interest rate:\n"
+                f"• {row['loan_number']} — {_na(row['customer_name'])}\n"
+                f"• Rate: {float(row['interest_rate'])*100:.2f}% p.a.  |  Amount: {fmt_inr(row['loan_amount'])}")
+
+    # ── Reloan count ──
+    if "reloan" in low:
+        c.execute("SELECT COUNT(*) as n FROM LoanEntry WHERE is_reloan=1")
+        n = c.fetchone()["n"] or 0
+        return f"🔄 Reloans: {n} loan(s) marked as reloan."
+
     return None  # fall through to search
 
 
@@ -2913,8 +3112,9 @@ def api_chatbot():
         return jsonify({"reply": "Please type something — a loan number, customer name, or ask me a question about your loans."})
 
     low = msg.lower().strip()
+    norm = _normalize_query(low) if msg != "__greet__" else low
 
-    intent_reply = _chatbot_intent(msg, low)
+    intent_reply = _chatbot_intent(msg, norm)
     if intent_reply is not None:
         return jsonify({"reply": intent_reply})
 
