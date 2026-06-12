@@ -199,13 +199,16 @@ class TRow(dict):
         if isinstance(k,int): return list(self.values())[k]
         return super().__getitem__(k)
 
+# Shared HTTP session — reuses TCP/TLS connections to Turso (big latency win)
+_TURSO_SESSION = http_req.Session()
+
 class TCur:
     def __init__(self,url,tok):
         self._u,self._t,self._rows,self._pos,self.lastrowid=url,tok,[],0,None
     def _exec(self,sql,p=()):
         stmt={"sql":sql.strip()}
         if p: stmt["args"]=[_tv(x) for x in p]
-        r=http_req.post(f"{self._u}/v2/pipeline",
+        r=_TURSO_SESSION.post(f"{self._u}/v2/pipeline",
             headers={"Authorization":f"Bearer {self._t}","Content-Type":"application/json"},
             json={"requests":[{"type":"execute","stmt":stmt},{"type":"close"}]},timeout=15)
         r.raise_for_status()
@@ -232,6 +235,29 @@ class TCur:
     def fetchall(self):
         r=self._rows[self._pos:];self._pos=len(self._rows);return r
     def __iter__(self): return iter(self._rows)
+    def batch(self, statements):
+        """Run multiple (sql, params) pairs in ONE HTTP round-trip.
+        Returns a list of result-row-lists, one per statement (errors -> []).
+        Massively reduces latency vs N separate calls when using Turso."""
+        reqs = []
+        for sql, p in statements:
+            stmt = {"sql": sql.strip()}
+            if p: stmt["args"] = [_tv(x) for x in p]
+            reqs.append({"type":"execute","stmt":stmt})
+        reqs.append({"type":"close"})
+        r = _TURSO_SESSION.post(f"{self._u}/v2/pipeline",
+            headers={"Authorization":f"Bearer {self._t}","Content-Type":"application/json"},
+            json={"requests":reqs}, timeout=20)
+        r.raise_for_status()
+        d = r.json()
+        out = []
+        for res in d["results"][:-1]:  # last is the "close" ack
+            if res.get("type") == "error":
+                out.append([]); continue
+            result = res["response"]["result"]
+            cols = [c["name"] for c in result.get("cols", [])]
+            out.append([TRow(zip(cols,[_fv(cell) for cell in row])) for row in result.get("rows", [])])
+        return out
 
 class TConn:
     def __init__(self,url,tok):
@@ -254,6 +280,18 @@ def get_db():
     return g.db
 
 def get_cur(): return get_db().cursor()
+
+def batch_query(statements):
+    """Run a list of (sql, params) pairs in ONE round-trip when possible (Turso),
+    or sequentially for local SQLite. Returns a list of fetchall()-style row lists."""
+    c = get_cur()
+    if hasattr(c, "batch"):
+        return c.batch(statements)
+    out = []
+    for sql, p in statements:
+        c.execute(sql, p)
+        out.append([dict(r) for r in c.fetchall()])
+    return out
 
 def init_db():
     conn = _make_conn(); cur = conn.cursor()
@@ -345,6 +383,26 @@ def init_db():
     for u, info in DEFAULT_USERS.items():
         cur.execute("INSERT OR IGNORE INTO Users (username,pw_hash,role,created_at) VALUES (?,?,?,?)",
                     (u, info["pw_hash"], info["role"], datetime.now(timezone.utc).isoformat()))
+
+    # ── PERFORMANCE INDEXES ──────────────────────────────────────────────────
+    for idx in [
+        "CREATE INDEX IF NOT EXISTS idx_emi_loan_id ON EMI(loan_id)",
+        "CREATE INDEX IF NOT EXISTS idx_emi_status ON EMI(status)",
+        "CREATE INDEX IF NOT EXISTS idx_emi_due_date ON EMI(due_date)",
+        "CREATE INDEX IF NOT EXISTS idx_emi_status_due ON EMI(status, due_date)",
+        "CREATE INDEX IF NOT EXISTS idx_emi_paid_at ON EMI(paid_at)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_number ON LoanEntry(loan_number)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_status ON LoanEntry(status)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_created ON LoanEntry(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_customer_name ON LoanEntry(customer_name)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_customer_mobile ON LoanEntry(customer_mobile)",
+        "CREATE INDEX IF NOT EXISTS idx_loan_vehicle_number ON LoanEntry(vehicle_number)",
+        "CREATE INDEX IF NOT EXISTS idx_customers_loan_id ON Customers(loan_id)",
+        "CREATE INDEX IF NOT EXISTS idx_customers_status ON Customers(status)",
+    ]:
+        try: cur.execute(idx)
+        except: pass
+
     conn.commit(); conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -521,27 +579,41 @@ def group_alerts_by_loan(emi_list):
     return list(grouped.values())
 
 def get_loan_summary_counts():
-    c=get_cur()
-    def cnt(sql): c.execute(sql); return c.fetchone()[0] or 0
+    today = date.today().isoformat()
+    limit = (date.today()+timedelta(days=UPCOMING_DAYS)).isoformat()
+
+    results = batch_query([
+        ("SELECT status, COUNT(*) as n FROM LoanEntry GROUP BY status", ()),
+        ("SELECT COUNT(*) as n FROM EMI WHERE status='Overdue' OR (status IN ('Pending','Partial') AND due_date < ?)", (today,)),
+        ("SELECT COUNT(*) as n FROM EMI WHERE status IN ('Pending','Partial') AND due_date>=? AND due_date<=?", (today, limit)),
+    ])
+
+    status_counts = {r["status"]: r["n"] for r in results[0]}
+    overdue_n  = (results[1][0]["n"] if results[1] else 0) or 0
+    upcoming_n = (results[2][0]["n"] if results[2] else 0) or 0
+
     return dict(
-        total   =cnt("SELECT COUNT(*) FROM LoanEntry"),
-        pending =cnt("SELECT COUNT(*) FROM LoanEntry WHERE status='PendingApproval'"),
-        approved=cnt("SELECT COUNT(*) FROM LoanEntry WHERE status='Approved'"),
-        rejected=cnt("SELECT COUNT(*) FROM LoanEntry WHERE status='Rejected'"),
-        closed  =cnt("SELECT COUNT(*) FROM LoanEntry WHERE status='Closed'"),
-        overdue =len(get_overdue_emis()),
-        upcoming=len(get_upcoming_emis()),
+        total   = sum(status_counts.values()),
+        pending = status_counts.get("PendingApproval", 0),
+        approved= status_counts.get("Approved", 0),
+        rejected= status_counts.get("Rejected", 0),
+        closed  = status_counts.get("Closed", 0),
+        overdue = overdue_n,
+        upcoming= upcoming_n,
     )
 
 def get_kpi_totals():
-    c=get_cur()
-    c.execute("SELECT COUNT(*),SUM(loan_amount) FROM LoanEntry")
-    row=c.fetchone(); tl=row[0] or 0; tla=row[1] or 0.0
-    c.execute("SELECT SUM(emi_amount) FROM EMI WHERE status='Paid'")
-    tr=c.fetchone()[0] or 0.0
-    c.execute("SELECT SUM(remaining_amount) FROM EMI WHERE status IN ('Pending','Overdue','Partial')")
-    tp=c.fetchone()[0] or 0.0
-    return tl,tla,tr,tp
+    results = batch_query([
+        ("SELECT COUNT(*) as n, SUM(loan_amount) as amt FROM LoanEntry", ()),
+        ("SELECT SUM(emi_amount) as amt FROM EMI WHERE status='Paid'", ()),
+        ("SELECT SUM(remaining_amount) as amt FROM EMI WHERE status IN ('Pending','Overdue','Partial')", ()),
+    ])
+    row = results[0][0] if results[0] else {}
+    tl  = row.get("n") or 0
+    tla = row.get("amt") or 0.0
+    tr  = (results[1][0].get("amt") if results[1] else 0) or 0.0
+    tp  = (results[2][0].get("amt") if results[2] else 0) or 0.0
+    return tl, tla, tr, tp
 
 def get_monthly_paid_series():
     c=get_cur()
@@ -2442,13 +2514,37 @@ def api_breakdown():
 
 # ── CHATBOT ────────────────────────────────────────────────────────────────────
 def _chatbot_search_loans(term):
-    q = f"%{term}%"
     c = get_cur()
+    term = term.strip()
+
+    # 1) Fast path: exact loan number match (indexed, instant)
+    c.execute("SELECT * FROM LoanEntry WHERE loan_number = ? LIMIT 6", (term,))
+    rows = c.fetchall()
+    if rows:
+        return [dict(r) for r in rows]
+
+    # 2) Fast path: exact mobile number match (10-digit numeric input)
+    if term.isdigit() and len(term) == 10:
+        c.execute("SELECT * FROM LoanEntry WHERE customer_mobile = ? LIMIT 6", (term,))
+        rows = c.fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+
+    # 3) Prefix match on loan_number (e.g. "LN-2026" -> uses index range scan)
+    if re.match(r"^[A-Za-z]{1,4}-?\d", term):
+        c.execute("SELECT * FROM LoanEntry WHERE loan_number LIKE ? ORDER BY created_at DESC LIMIT 6", (f"{term}%",))
+        rows = c.fetchall()
+        if rows:
+            return [dict(r) for r in rows]
+
+    # 4) Broad fallback search (only reached if nothing matched above)
+    q = f"%{term}%"
     c.execute("""SELECT * FROM LoanEntry
-                 WHERE loan_number LIKE ? OR customer_name LIKE ? OR customer_mobile LIKE ?
+                 WHERE customer_name LIKE ? OR customer_mobile LIKE ?
                     OR vehicle_number LIKE ? OR vehicle_model LIKE ?
                     OR engine_number LIKE ? OR chassis_number LIKE ?
                     OR guarantor_name LIKE ? OR guarantor_mobile LIKE ?
+                    OR loan_number LIKE ?
                  ORDER BY created_at DESC LIMIT 6""",
               (q,q,q,q,q,q,q,q,q))
     return [dict(r) for r in c.fetchall()]
